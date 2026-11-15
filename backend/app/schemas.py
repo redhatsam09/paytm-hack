@@ -115,6 +115,9 @@ class UdhariReconcileRequest(BaseModel):
     utr: str
     amount_paid: float = Field(gt=0)
 
+class DemoUdhariFixtureRequest(BaseModel):
+    udhari_id: str
+
 class UdhariReconcileResponse(BaseModel):
     success: bool
     message: str
@@ -146,7 +149,7 @@ class InvoiceAnalysisResponse(BaseModel):
     items: List[InvoiceItemParsed]
     price_hikes: List[InvoiceItemParsed]
     draft_po: DraftPO
-    analysis_source: Literal["LOCAL_FIXTURE", "GEMINI_VISION"] = "LOCAL_FIXTURE"
+    analysis_source: Literal["LOCAL_FIXTURE", "GEMINI_VISION", "CSV_UPLOAD"] = "LOCAL_FIXTURE"
     validation_note: str = "Local fixture data; no external OCR or supplier API was used."
 
 class SendPORequest(BaseModel):

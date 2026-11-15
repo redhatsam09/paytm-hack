@@ -53,16 +53,6 @@ const mockState = {
   ] as UdhariItem[],
 };
 
-// Check backend connectivity
-export async function checkBackendHealth(): Promise<boolean> {
-  try {
-    const res = await fetch(`${API_BASE}/health`, { signal: AbortSignal.timeout(1500) });
-    return res.ok;
-  } catch {
-    return false;
-  }
-}
-
 // Subscribe to real-time Server-Sent Events (SSE)
 export function subscribeToEvents(onEvent: (event: { event_type: string; data?: unknown }) => void): () => void {
   if (typeof window === 'undefined') return () => {};
@@ -136,15 +126,24 @@ export async function parseVoiceCommand(transcript: string, lang = 'hi'): Promis
   let upi_amount = 0;
   let udhari_amount = 0;
   let cash_amount = 0;
-  let customer_name = 'Ramesh';
-  let customer_phone = '9876543210';
-  let due_date = '2026-11-17';
+  let customer_name: string | undefined;
+  let customer_phone: string | undefined;
+  let due_date: string | undefined;
 
   const phoneMatch = transcript.match(/\b[6-9]\d{9}\b/);
   if (phoneMatch) customer_phone = phoneMatch[0];
 
-  const nameMatch = transcript.match(/\b(Ramesh|Suresh|Priya|Anita|Anjali|Vikram|Amit|Rahul|Kiran|Sunil)\b/i);
-  if (nameMatch) customer_name = nameMatch[0];
+  const excludedNames = new Set(['customer', 'grahak', 'bill', 'total', 'upi', 'online', 'cash', 'credit', 'udhari', 'khata', 'baaki', 'for', 'to', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']);
+  const nameBeforePhone = transcript.match(/\b([A-Za-z][A-Za-z'-]*(?:\s+[A-Za-z][A-Za-z'-]*){0,2})\s+[6-9]\d{9}\b/);
+  const namedPhrase = transcript.match(/\b(?:customer|grahak|name|for|to)\s+(?:is\s+)?([A-Za-z][A-Za-z'-]*(?:\s+[A-Za-z][A-Za-z'-]*)?)/i);
+  const atStart = transcript.match(/^\s*([A-Za-z][A-Za-z'-]*)\s+(?=(?:bill|total|upi|credit|udhari|khata)\b)/i);
+  for (const rawCandidate of [nameBeforePhone?.[1], namedPhrase?.[1], atStart?.[1]]) {
+    const candidateWords = (rawCandidate || '').trim().split(/\s+/).filter((word) => word && !excludedNames.has(word.toLowerCase()));
+    if (candidateWords.length) {
+      customer_name = candidateWords.join(' ').replace(/\b[a-z]/g, (letter) => letter.toUpperCase());
+      break;
+    }
+  }
 
   const billMatch = transcript.match(/(?:bill|total|for)?\s*(?:₹|rs\.?|inr)?\s*(\d+)/i);
   if (billMatch) total_bill = parseFloat(billMatch[1]);
@@ -170,9 +169,23 @@ export async function parseVoiceCommand(transcript: string, lang = 'hi'): Promis
     total_bill = upi_amount + udhari_amount + cash_amount;
   }
 
-  if (lower.includes('monday') || lower.includes('somwar')) due_date = '2026-11-17';
-  else if (lower.includes('friday') || lower.includes('shukrawar')) due_date = '2026-11-21';
-  else if (lower.includes('tomorrow') || lower.includes('kal')) due_date = '2026-11-15';
+  const weekdayTokens = [
+    ['sunday', 'itwar', 'raviwar'],
+    ['monday', 'somwar', 'somvaar'],
+    ['tuesday', 'mangalwar', 'mangalvaar'],
+    ['wednesday', 'budhwar', 'budhvaar'],
+    ['thursday', 'guruwar', 'guruvaar'],
+    ['friday', 'shukrawar', 'shukravaar'],
+    ['saturday', 'shaniwar', 'shanivaar'],
+  ];
+  const weekday = weekdayTokens.findIndex((tokens) => tokens.some((day) => lower.includes(day)));
+  const due = new Date();
+  if (lower.includes('tomorrow') || lower.includes('kal')) due.setDate(due.getDate() + 1);
+  else if (weekday >= 0) {
+    const daysAhead = (weekday - due.getDay() + 7) % 7 || 7;
+    due.setDate(due.getDate() + daysAhead);
+  } else if (udhari_amount > 0) due.setDate(due.getDate() + 7);
+  if (udhari_amount > 0) due_date = due.toISOString().slice(0, 10);
 
   const latency_ms = Math.round(performance.now() - startTime + 8);
 
@@ -181,14 +194,14 @@ export async function parseVoiceCommand(transcript: string, lang = 'hi'): Promis
     transcript,
     latency_ms,
     data: {
-      total_bill: total_bill || 650,
-      upi_amount: upi_amount || 400,
-      udhari_amount: udhari_amount || 250,
+      total_bill,
+      upi_amount,
+      udhari_amount,
       cash_amount,
       due_date,
       customer_name,
       customer_phone,
-      items: ['Kirana split items'],
+      items: [],
     },
   };
 }
@@ -203,7 +216,7 @@ export async function createCounterInvoice(payload: {
   customer_phone?: string;
   due_date?: string;
 }): Promise<InvoiceData> {
-  let response: Response | null = null;
+  let response: Response;
   try {
     response = await fetch(`${API_BASE}/api/counter/create-invoice`, {
       method: 'POST',
@@ -211,56 +224,11 @@ export async function createCounterInvoice(payload: {
       body: JSON.stringify(payload),
       signal: AbortSignal.timeout(3000),
     });
-  } catch {
-    // Offline local preview below; never use it after a live backend rejects an order.
+  } catch (error) {
+    throw new Error(error instanceof Error ? `Counter service unavailable: ${error.message}` : 'Counter service unavailable');
   }
-  if (response) {
-    if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail || 'Could not create payment QR');
-    const invoice = await response.json();
-    mockState.activeInvoice = invoice;
-    return invoice;
-  }
-
-  const invoice_id = `INV-${Math.floor(1000 + Math.random() * 9000)}`;
-  const upi_string = `upi://pay?pa=demo-not-a-real-vpa.invalid&pn=DEMO_ONLY&am=${payload.upi_due.toFixed(2)}&cu=INR&tr=${invoice_id}&tn=NoPayment`;
-  const qr_code_url = `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(upi_string)}`;
-
-  let udhari_id: string | undefined = undefined;
-  if (payload.udhari_amount > 0) {
-    udhari_id = `udh-${Date.now().toString().slice(-4)}`;
-    const newUdhari: UdhariItem = {
-      id: udhari_id,
-      transaction_id: invoice_id,
-      customer_name: payload.customer_name || 'Ramesh',
-      customer_phone: payload.customer_phone || '9876543210',
-      amount_due: payload.udhari_amount,
-      due_date: payload.due_date || '2026-11-17',
-      status: 'UNPAID',
-      paytm_payment_link: `https://p.paytm.me/pay?id=${udhari_id}&am=${payload.udhari_amount.toFixed(2)}`,
-      payment_link_id: `PLINK-${udhari_id}`,
-      created_at: new Date().toISOString(),
-    };
-    mockState.udhariList.unshift(newUdhari);
-  }
-
-  const invoice: InvoiceData = {
-    invoice_id,
-    total_bill: payload.total_bill,
-    upi_due: payload.upi_due,
-    udhari_amount: payload.udhari_amount,
-    cash_received: payload.cash_received || 0,
-    customer_name: payload.customer_name,
-    customer_phone: payload.customer_phone,
-    due_date: payload.due_date,
-    qr_data: upi_string,
-    qr_code_url,
-    amount: payload.upi_due,
-    expires_in: 180,
-    status: 'PENDING_PAYMENT',
-    payment_mode: 'DEMO',
-    udhari_id,
-  };
-
+  if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail || 'Could not create payment invoice');
+  const invoice = await response.json();
   mockState.activeInvoice = invoice;
   return invoice;
 }
@@ -323,23 +291,14 @@ export async function getUdhariList(): Promise<UdhariItem[]> {
 }
 
 export async function sendUdhariReminder(udhariId: string): Promise<{ success: boolean; message: string }> {
-  try {
-    const res = await fetch(`${API_BASE}/api/udhari/send-reminder`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ udhari_id: udhariId }),
-      signal: AbortSignal.timeout(2000),
-    });
-    if (res.ok) return await res.json();
-  } catch {
-    // Fallback
-  }
-
-  const item = mockState.udhariList.find(i => i.id === udhariId);
-  if (item && item.status === 'UNPAID') {
-    item.status = 'REMINDER_SENT';
-  }
-  return { success: true, message: `WhatsApp reminder dispatched for ${item?.customer_name || 'Customer'}` };
+  const res = await fetch(`${API_BASE}/api/udhari/send-reminder`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ udhari_id: udhariId }),
+    signal: AbortSignal.timeout(5000),
+  });
+  if (!res.ok) throw new Error((await res.json().catch(() => null))?.detail || 'Could not prepare WhatsApp reminder');
+  return await res.json();
 }
 
 export async function reconcileUdhariPayment(udhariId: string, amount: number): Promise<{ success: boolean; message: string }> {
@@ -376,103 +335,44 @@ export async function reconcileUdhariPayment(udhariId: string, amount: number): 
   return { success: true, message: `Payment of ₹${amount} reconciled. Udhari settled!` };
 }
 
+export async function replayDemoUdhariSettlement(udhariId: string): Promise<{ success: boolean; message: string }> {
+  const res = await fetch(`${API_BASE}/api/udhari/demo-settlement-fixture`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ udhari_id: udhariId }),
+    signal: AbortSignal.timeout(5000),
+  });
+  if (!res.ok) throw new Error((await res.json().catch(() => null))?.detail || 'Local settlement fixture rejected');
+  return await res.json();
+}
+
 // 5. Restock & Vision OCR APIs
 export async function analyzeDistributorInvoice(file?: File | null): Promise<InvoiceAnalysisResponse> {
   if (file) {
+    let res: Response;
     try {
       const formData = new FormData();
       formData.append('file', file);
-      const res = await fetch(`${API_BASE}/api/restock/analyze-invoice`, {
+      res = await fetch(`${API_BASE}/api/restock/analyze-invoice`, {
         method: 'POST',
         body: formData,
-        signal: AbortSignal.timeout(8000),
+        signal: AbortSignal.timeout(30_000),
       });
-      if (res.ok) return await res.json();
-    } catch {
-      // Fallback
+    } catch (error) {
+      throw new Error(error instanceof Error ? `Invoice analysis unavailable: ${error.message}` : 'Invoice analysis unavailable');
     }
-  } else {
-    try {
-      const res = await fetch(`${API_BASE}/api/restock/analyze-invoice`, {
-        method: 'POST',
-        signal: AbortSignal.timeout(5000),
-      });
-      if (res.ok) return await res.json();
-    } catch {
-      // Fallback
-    }
+    if (!res.ok) throw new Error((await res.json().catch(() => null))?.detail || 'Uploaded invoice could not be analyzed');
+    return await res.json();
   }
 
-  // High-fidelity fallback
-  return {
-    success: true,
-    vendor_name: 'Metro Cash & Carry Wholesale Pvt Ltd',
-    invoice_no: 'MCR-2026-9921',
-    invoice_date: '14 Nov 2026',
-    items: [
-      {
-        sku: 'Fortune Sunlite Refined Sunflower Oil 1L Pouch',
-        quantity: 20,
-        unit_rate: 155.0,
-        previous_rate: 140.0,
-        price_hike_detected: true,
-        hike_amount: 15.0,
-        hike_percentage: 10.71,
-        warning: '⚠️ RATE HIKE: Increased by ₹15/unit (+10.7%) since Oct 12!',
-      },
-      {
-        sku: 'Aashirvaad Superior MP Sharbati Atta 10kg',
-        quantity: 10,
-        unit_rate: 430.0,
-        previous_rate: 430.0,
-        price_hike_detected: false,
-        hike_amount: 0,
-        hike_percentage: 0,
-      },
-      {
-        sku: 'Tata Salt Vacuum Evaporated Iodized 1kg',
-        quantity: 50,
-        unit_rate: 26.0,
-        previous_rate: 25.0,
-        price_hike_detected: false,
-        hike_amount: 1.0,
-        hike_percentage: 4.0,
-      },
-      {
-        sku: 'Madhur Pure & Hygienic Sugar 5kg',
-        quantity: 15,
-        unit_rate: 220.0,
-        previous_rate: 220.0,
-        price_hike_detected: false,
-        hike_amount: 0,
-        hike_percentage: 0,
-      },
-    ],
-    price_hikes: [
-      {
-        sku: 'Fortune Sunlite Refined Sunflower Oil 1L Pouch',
-        quantity: 20,
-        unit_rate: 155.0,
-        previous_rate: 140.0,
-        price_hike_detected: true,
-        hike_amount: 15.0,
-        hike_percentage: 10.71,
-        warning: '⚠️ RATE HIKE: Increased by ₹15/unit (+10.7%) since Oct 12!',
-      },
-    ],
-    draft_po: {
-      po_number: 'PO-882',
-      supplier_name: 'Metro Cash & Carry Wholesale',
-      supplier_phone: '+91 98888 77665',
-      items: [
-        { sku: 'Fortune Sunlite Sunflower Oil 1L', quantity: 20, expected_rate: 140.0 },
-        { sku: 'Aashirvaad MP Atta 10kg', quantity: 15, expected_rate: 430.0 },
-        { sku: 'Tata Salt 1kg', quantity: 30, expected_rate: 25.0 },
-      ],
-    },
-    analysis_source: 'LOCAL_FIXTURE',
-    validation_note: 'Local fixture data; no external OCR or supplier API was used.',
-  };
+  const res = await fetch(`${API_BASE}/api/restock/analyze-invoice`, {
+    method: 'POST',
+    signal: AbortSignal.timeout(10_000),
+  }).catch((error: unknown) => {
+    throw new Error(error instanceof Error ? `Sample analysis unavailable: ${error.message}` : 'Sample analysis unavailable');
+  });
+  if (!res.ok) throw new Error((await res.json().catch(() => null))?.detail || 'Sample invoice fixture could not be analyzed');
+  return await res.json();
 }
 
 export async function sendPurchaseOrder(payload: {
@@ -481,29 +381,12 @@ export async function sendPurchaseOrder(payload: {
   supplier_phone: string;
   items: Array<{ sku: string; quantity: number; expected_rate?: number; rate?: number }>;
 }): Promise<RestockOrderResponse> {
-  try {
-    const res = await fetch(`${API_BASE}/api/restock/send-po`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(3000),
-    });
-    if (res.ok) return await res.json();
-  } catch {
-    // Fallback
-  }
-
-  const itemsList = payload.items
-    .map(i => `• ${i.quantity}x ${i.sku} (Target: ₹${i.expected_rate || i.rate || 'Market'})`)
-    .join('\n');
-
-  const preview = `📦 *PURCHASE ORDER: ${payload.po_number}*\nFrom: *Sri Lakshmi Stores*\nTo: *${payload.supplier_name}*\n\nPlease confirm dispatch for:\n${itemsList}\n\n_Generated via Paytm Restock Agent_`;
-
-  return {
-    success: true,
-    message: `Purchase Order ${payload.po_number} dispatched to ${payload.supplier_name} via WhatsApp!`,
-    po_number: payload.po_number,
-    status: 'DISPATCHED_WHATSAPP',
-    whatsapp_preview: preview,
-  };
+  const res = await fetch(`${API_BASE}/api/restock/send-po`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(5000),
+  });
+  if (!res.ok) throw new Error((await res.json().catch(() => null))?.detail || 'Could not save purchase order draft');
+  return await res.json();
 }

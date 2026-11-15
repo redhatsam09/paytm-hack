@@ -1,6 +1,8 @@
 import os
 import json
 import uuid
+import csv
+import io
 import datetime
 from typing import List, Dict, Any, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -33,18 +35,59 @@ async def analyze_invoice_image(
     filename: Optional[str] = None
 ) -> InvoiceAnalysisResponse:
     """
-    Analyze distributor invoice image with Gemini 2.5 Flash Vision OCR,
-    with smart fallback, compare historical prices from DB, and draft PO.
+    Analyze an uploaded CSV or Gemini Vision image/PDF, compare historical
+    prices from DB, and draft a PO from the analyzed line items. No-file calls
+    explicitly select the local sample fixture.
     """
-    vendor_name = "Adani Wilmar Dist."
-    invoice_no = f"INV-WH-{datetime.datetime.now().strftime('%m%d%H')}"
-    invoice_date = datetime.date.today().isoformat()
+    vendor_name = "Supplier not detected"
+    supplier_phone = ""
+    invoice_no = "Not detected"
+    invoice_date = "Not detected"
     raw_items = SAMPLE_INVOICE_ITEMS
     analysis_source = "LOCAL_FIXTURE"
     validation_note = "Local fixture data; no external OCR or supplier API was used."
+    is_csv_upload = bool(filename and filename.lower().endswith(".csv") and image_bytes)
 
-    # Try Gemini Vision if API key is configured
-    if settings.GEMINI_API_KEY and image_bytes:
+    if not image_bytes:
+        today = datetime.date.today()
+        vendor_name = "Adani Wilmar Dist."
+        supplier_phone = "+919840123456"
+        invoice_no = f"SAMPLE-{today.strftime('%Y%m%d')}"
+        invoice_date = today.isoformat()
+
+    if is_csv_upload:
+        try:
+            reader = csv.DictReader(io.StringIO(image_bytes.decode("utf-8-sig")))
+            if not reader.fieldnames:
+                raise ValueError("CSV has no header row")
+            normalized = {name.strip().lower(): name for name in reader.fieldnames if name}
+            if not {"sku", "quantity", "unit_rate"}.issubset(normalized):
+                raise ValueError("CSV needs sku, quantity, and unit_rate columns")
+            raw_items = []
+            for row in reader:
+                sku = (row.get(normalized["sku"]) or "").strip()
+                quantity = int(row.get(normalized["quantity"]) or 0)
+                unit_rate = float(row.get(normalized["unit_rate"]) or 0)
+                if not sku or quantity <= 0 or unit_rate <= 0:
+                    raise ValueError("Each row needs a SKU and positive quantity and unit_rate")
+                raw_items.append({"sku": sku, "quantity": quantity, "unit_rate": unit_rate})
+                vendor_name = (row.get(normalized.get("vendor_name", "")) or vendor_name).strip()
+                invoice_no = (row.get(normalized.get("invoice_no", "")) or invoice_no).strip()
+                invoice_date = (row.get(normalized.get("invoice_date", "")) or invoice_date).strip()
+                supplier_phone = (row.get(normalized.get("supplier_phone", "")) or supplier_phone).strip()
+            if not raw_items:
+                raise ValueError("CSV contains no item rows")
+            analysis_source = "CSV_UPLOAD"
+            validation_note = "Uploaded CSV rows were audited against stored supplier price history; no AI OCR was used."
+        except (UnicodeDecodeError, csv.Error, ValueError) as exc:
+            raise RuntimeError(f"Could not read invoice CSV: {exc}") from exc
+
+    # Uploaded files must never be reported as OCR results when only fixture
+    # data was analyzed. The no-file path is the explicit local demo fixture.
+    if image_bytes and not is_csv_upload and not settings.GEMINI_API_KEY:
+        raise RuntimeError("GEMINI_API_KEY is required to analyze an uploaded distributor invoice")
+
+    if image_bytes and not is_csv_upload:
         try:
             from google import genai
             from google.genai import types
@@ -65,9 +108,10 @@ async def analyze_invoice_image(
             You are an expert OCR parser for Indian wholesale Kirana store distributor invoices.
             Analyze this invoice image and extract:
             1. vendor_name (string, name of distributor or wholesaler)
-            2. invoice_no (string)
-            3. invoice_date (YYYY-MM-DD)
-            4. items: list of objects with "sku" (name of product), "quantity" (integer), and "unit_rate" (float)
+            2. supplier_phone (string or null, phone printed on the invoice)
+            3. invoice_no (string)
+            4. invoice_date (YYYY-MM-DD)
+            5. items: list of objects with "sku" (name of product), "quantity" (integer), and "unit_rate" (float)
             Return strictly valid JSON only without markdown or code blocks.
             """
             
@@ -102,12 +146,14 @@ async def analyze_invoice_image(
                 invoice_no = parsed_json["invoice_no"]
             if "invoice_date" in parsed_json and parsed_json["invoice_date"]:
                 invoice_date = parsed_json["invoice_date"]
-            if "items" in parsed_json and isinstance(parsed_json["items"], list) and len(parsed_json["items"]) > 0:
-                raw_items = parsed_json["items"]
-                analysis_source = "GEMINI_VISION"
-                validation_note = "OCR output was normalized and checked against stored SKU price history."
+            supplier_phone = str(parsed_json.get("supplier_phone") or "")
+            if not isinstance(parsed_json.get("items"), list) or not parsed_json["items"]:
+                raise ValueError("OCR response did not contain invoice line items")
+            raw_items = parsed_json["items"]
+            analysis_source = "GEMINI_VISION"
+            validation_note = "OCR output was normalized and checked against stored SKU price history."
         except Exception as e:
-            print(f"Notice: Gemini API call failed or timed out ({e}), using robust Kirana OCR engine.")
+            raise RuntimeError(f"Invoice OCR failed ({type(e).__name__}); fixture data was not substituted") from e
 
     # Price Hike Detector against SQLite database
     parsed_items: List[InvoiceItemParsed] = []
@@ -155,16 +201,20 @@ async def analyze_invoice_image(
         if hike_detected:
             price_hikes.append(parsed_obj)
 
-    # Draft Purchase Order for low stock / fast-moving staples
+    # Draft quantities and target rates from the actual analyzed lines. This
+    # prototype has no stock-count feed, so it avoids inventing low-stock SKUs.
     po_number = f"PO-{uuid.uuid4().hex[:4].upper()}"
     draft_po = DraftPO(
         po_number=po_number,
         supplier_name=vendor_name,
-        supplier_phone="+919840123456",
+        supplier_phone=supplier_phone,
         items=[
-            {"sku": "India Gate Basmati Rice 5kg", "quantity": 15, "expected_rate": 420.0},
-            {"sku": "Fortune Sunflower Oil 1L", "quantity": 25, "expected_rate": 140.0},
-            {"sku": "Toor Dal 1kg", "quantity": 20, "expected_rate": 160.0}
+            {
+                "sku": item.sku,
+                "quantity": item.quantity,
+                "expected_rate": item.previous_rate if item.previous_rate is not None else item.unit_rate,
+            }
+            for item in parsed_items
         ]
     )
 

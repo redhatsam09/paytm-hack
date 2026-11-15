@@ -1,4 +1,8 @@
 import uuid
+import hashlib
+import hmac
+import json
+import secrets
 from datetime import datetime, timezone
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException
@@ -12,8 +16,10 @@ from app.schemas import (
     UdhariReminderRequest,
     UdhariReminderResponse,
     UdhariReconcileRequest,
-    UdhariReconcileResponse
+    UdhariReconcileResponse,
+    DemoUdhariFixtureRequest,
 )
+from app.config import paytm_live_ready
 from app.services.whatsapp_service import (
     create_paytm_payment_link,
     format_udhari_whatsapp_message
@@ -21,6 +27,14 @@ from app.services.whatsapp_service import (
 from app.services.sse_manager import sse_manager
 
 router = APIRouter(prefix="/udhari", tags=["WhatsApp & Udhari Ledger"])
+_DEMO_UDHARI_KEY = secrets.token_bytes(32)
+
+def _udhari_fixture_signature(event: dict) -> str:
+    canonical = json.dumps(event, sort_keys=True, separators=(",", ":")).encode()
+    return hmac.new(_DEMO_UDHARI_KEY, canonical, hashlib.sha256).hexdigest()
+
+def _verify_udhari_fixture(event: dict, signature: str) -> bool:
+    return hmac.compare_digest(_udhari_fixture_signature(event), signature)
 
 @router.get("/list", response_model=List[UdhariItem])
 async def list_udhari_entries(status: Optional[str] = None, db: AsyncSession = Depends(get_db)):
@@ -105,10 +119,6 @@ async def send_whatsapp_reminder(request: UdhariReminderRequest, db: AsyncSessio
     if not udhari:
         raise HTTPException(status_code=404, detail="Udhari ledger entry not found")
 
-    # Update status to REMINDER_SENT
-    udhari.status = "REMINDER_SENT"
-    await db.commit()
-
     whatsapp_payload = format_udhari_whatsapp_message(
         customer_name=udhari.customer_name,
         amount=udhari.amount_due,
@@ -116,7 +126,7 @@ async def send_whatsapp_reminder(request: UdhariReminderRequest, db: AsyncSessio
         payment_link=udhari.paytm_payment_link
     )
 
-    await sse_manager.broadcast("UDHARI_REMINDER_SENT", {
+    await sse_manager.broadcast("UDHARI_REMINDER_PREPARED", {
         "udhari_id": udhari.id,
         "customer_name": udhari.customer_name,
         "whatsapp_payload": whatsapp_payload
@@ -124,16 +134,18 @@ async def send_whatsapp_reminder(request: UdhariReminderRequest, db: AsyncSessio
 
     return UdhariReminderResponse(
         success=True,
-        message=f"WhatsApp reminder sent to {udhari.customer_name} ({udhari.customer_phone})",
+        message=f"WhatsApp reminder prepared for {udhari.customer_name}; merchant must send it from WhatsApp",
         whatsapp_payload=whatsapp_payload
     )
 
 @router.post("/reconcile", response_model=UdhariReconcileResponse)
 async def reconcile_udhari_payment(request: UdhariReconcileRequest, db: AsyncSession = Depends(get_db)):
     """
-    Simulates webhook callback when customer clicks and pays via the WhatsApp Paytm link.
-    Instantly marks ledger as SETTLED.
+    Local-only demo reconciliation using a supplied amount. Live Paytm mode rejects it;
+    the WhatsApp link does not currently deliver a verified provider callback here.
     """
+    if paytm_live_ready():
+        raise HTTPException(status_code=409, detail="Client-supplied settlement is disabled in Paytm live mode")
     stmt = select(UdhariLedger).where(
         (UdhariLedger.id == request.udhari_id) | (UdhariLedger.payment_link_id == request.udhari_id)
     )
@@ -168,6 +180,45 @@ async def reconcile_udhari_payment(request: UdhariReconcileRequest, db: AsyncSes
 
     return UdhariReconcileResponse(
         success=True,
-        message=f"Udhari of ₹{request.amount_paid} settled for {udhari.customer_name} via Paytm UPI UTR#{request.utr}",
+        message=f"Local demo reconciliation recorded for ₹{request.amount_paid} on {udhari.customer_name}'s store-credit entry",
         settled_record=settled_record
+    )
+
+
+@router.post("/demo-settlement-fixture", response_model=UdhariReconcileResponse)
+async def replay_demo_udhari_fixture(request: DemoUdhariFixtureRequest, db: AsyncSession = Depends(get_db)):
+    """Record an exact, server-signed local settlement fixture without a client amount."""
+    if paytm_live_ready():
+        raise HTTPException(status_code=409, detail="Local settlement fixtures are disabled in Paytm live mode")
+    udhari = await db.scalar(select(UdhariLedger).where(UdhariLedger.id == request.udhari_id))
+    if not udhari:
+        raise HTTPException(status_code=404, detail="Udhari record not found")
+    if udhari.status == "SETTLED":
+        raise HTTPException(status_code=409, detail="Udhari record is already settled")
+
+    event = {
+        "udhari_id": udhari.id,
+        "amount": round(float(udhari.amount_due), 2),
+        "utr": f"FIXTURE-{secrets.token_hex(8).upper()}",
+    }
+    signature = _udhari_fixture_signature(event)
+    if not _verify_udhari_fixture(event, signature):
+        raise HTTPException(status_code=401, detail="Local settlement fixture signature validation failed")
+
+    now = datetime.now(timezone.utc)
+    udhari.status = "SETTLED"
+    udhari.settled_at = now
+    await db.commit()
+    settled_record = {
+        "id": udhari.id,
+        "customer_name": udhari.customer_name,
+        "amount_settled": event["amount"],
+        "utr": event["utr"],
+        "settled_at": now.isoformat(),
+    }
+    await sse_manager.broadcast("UDHARI_SETTLED", settled_record)
+    return UdhariReconcileResponse(
+        success=True,
+        message=f"Local demo fixture reconciled ₹{event['amount']:.2f} for {udhari.customer_name}; no payment provider was queried",
+        settled_record=settled_record,
     )

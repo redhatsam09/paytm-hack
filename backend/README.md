@@ -120,21 +120,23 @@ pytest -v
 
 ### 2.4 WhatsApp & Partial Udhari Ledger
 - **`GET /api/udhari/list`**
-  Lists all ledger records (UNPAID, REMINDER_SENT, SETTLED).
+  Lists all ledger records (UNPAID, SETTLED). Preparing a WhatsApp draft does not change settlement state.
 - **`POST /api/udhari/send-reminder`**
-  Sends an interactive WhatsApp reminder containing a 1-click `https://p.paytm.me/pay?id=...` payment link.
+  Prepares a WhatsApp message and payment-link preview. The merchant must review and send it; this endpoint does not send WhatsApp messages.
 - **`POST /api/udhari/reconcile`**
-  Webhook simulation when customer completes payment via WhatsApp payment link, settling the ledger entry.
+  Local demo reconciliation only. It rejects client-supplied settlement for invoices created in Paytm live mode.
+- **`POST /api/udhari/demo-settlement-fixture`**
+  Runs a server-generated exact-balance fixture without accepting a browser-supplied amount. It is disabled when Paytm live credentials are configured and does not prove money moved.
 - **`POST /api/udhari/create`**
   Directly registers a store credit record.
 
 ### 2.5 Snap-to-Restock Agent (Vision OCR & Wholesale Price Auditor)
 - **`POST /api/restock/analyze-invoice`**
-  Accepts uploaded paper bill photograph. Extracts SKU line items, compares unit rates against past supplier invoices in SQLite DB, flags price hikes > 5%, and auto-drafts a low-stock Purchase Order (PO).
+  Accepts a CSV (`sku,quantity,unit_rate`) for a deterministic price audit, or an image/PDF for Gemini OCR when `GEMINI_API_KEY` is configured. Extracted rates are compared with supplier history and the draft PO is built from the uploaded line items. A request without a file uses the labeled local sample fixture.
 - **`GET /api/restock/price-history`**
   Returns historical wholesale rates for staple SKUs.
 - **`POST /api/restock/send-po`**
-  Dispatches Purchase Order to supplier WhatsApp thread.
+  Saves a purchase-order draft and returns its WhatsApp message preview. The merchant must press Send in WhatsApp; this endpoint does not dispatch the message.
 - **`GET /api/restock/orders`**
   Lists all wholesale restock orders.
 
@@ -160,6 +162,6 @@ pytest -v
 
 1. **`merchants`**: Store settings, VPA (`srilakshmi@paytm`), phone, preferred language.
 2. **`transactions`**: Counter bills, status (`PENDING_PAYMENT`, `COMPLETED`, `SHORT_PAYMENT`), UTR, QR data.
-3. **`udhari_ledger`**: Customer credit records, due dates, statuses (`UNPAID`, `REMINDER_SENT`, `SETTLED`), Paytm payment links.
+3. **`udhari_ledger`**: Customer credit records, due dates, statuses (`UNPAID`, `SETTLED`), and payment-link previews.
 4. **`sku_price_history`**: Historical distributor unit rates for price hike detection.
-5. **`restock_orders`**: Wholesaler purchase orders and WhatsApp dispatch logs.
+5. **`restock_orders`**: Wholesaler purchase-order drafts and WhatsApp message previews.

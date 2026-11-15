@@ -1,6 +1,6 @@
 import uuid
 import random
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -32,6 +32,12 @@ async def create_invoice(request: CreateInvoiceRequest, db: AsyncSession = Depen
     optionally draft Udhari record, and broadcast to customer screen.
     """
     global active_counter_state
+
+    if request.udhari_amount > 0 and not (request.customer_name or "").strip():
+        raise HTTPException(status_code=422, detail="A customer name is required when creating store credit")
+    effective_due_date = request.due_date
+    if request.udhari_amount > 0 and not effective_due_date:
+        effective_due_date = (datetime.now(timezone.utc) + timedelta(days=7)).date().isoformat()
 
     # Generate collision-free unique invoice ID
     invoice_id = f"INV-{uuid.uuid4().hex[:6].upper()}"
@@ -69,7 +75,7 @@ async def create_invoice(request: CreateInvoiceRequest, db: AsyncSession = Depen
         udhari_amount=request.udhari_amount,
         customer_name=request.customer_name,
         customer_phone=request.customer_phone,
-        due_date=request.due_date,
+        due_date=effective_due_date,
         items_summary=request.items_summary,
         status="PENDING_PAYMENT",
         qr_data=upi_string,
@@ -81,8 +87,8 @@ async def create_invoice(request: CreateInvoiceRequest, db: AsyncSession = Depen
     udhari_id = None
     if request.udhari_amount > 0 and request.customer_name:
         link_url, link_id = create_paytm_payment_link(request.udhari_amount)
-        due = request.due_date or "Next Week"
-        phone = request.customer_phone or "9876543210"
+        due = effective_due_date or ""
+        phone = request.customer_phone or ""
 
         udhari = UdhariLedger(
             id=str(uuid.uuid4()),
@@ -110,7 +116,7 @@ async def create_invoice(request: CreateInvoiceRequest, db: AsyncSession = Depen
         "cash_received": request.cash_received,
         "customer_name": request.customer_name,
         "customer_phone": request.customer_phone,
-        "due_date": request.due_date,
+        "due_date": effective_due_date,
         "qr_data": upi_string,
         "qr_code_url": qr_base64,
         "amount": request.upi_due,

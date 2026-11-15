@@ -97,7 +97,7 @@ export interface InvoiceAnalysisResponse {
   items: InvoiceItemParsed[];
   price_hikes: InvoiceItemParsed[];
   draft_po: DraftPO;
-  analysis_source?: 'LOCAL_FIXTURE' | 'GEMINI_VISION';
+  analysis_source?: 'LOCAL_FIXTURE' | 'GEMINI_VISION' | 'CSV_UPLOAD';
   validation_note?: string;
 }
 

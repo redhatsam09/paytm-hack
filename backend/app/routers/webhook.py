@@ -39,8 +39,8 @@ async def replay_demo_fixture(request: DemoFixtureRequest, db: AsyncSession = De
         raise HTTPException(status_code=404, detail="Fixture invoice was not found")
     if txn.payment_mode == "PAYTM_DYNAMIC_QR":
         raise HTTPException(status_code=409, detail="A live Paytm invoice cannot use a local fixture")
-    if txn.status not in {"PENDING_PAYMENT", "SHORT_PAYMENT"}:
-        raise HTTPException(status_code=409, detail="This invoice is already settled")
+    if txn.status not in {"PENDING_PAYMENT", "SHORT_PAYMENT", "COMPLETED"}:
+        raise HTTPException(status_code=409, detail="This invoice cannot be used for a local payment fixture")
 
     amount = float(txn.upi_due) if request.scenario == "exact_match" else min(40.0, max(0.01, float(txn.upi_due) / 2))
     event = {

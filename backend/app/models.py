@@ -49,7 +49,7 @@ class UdhariLedger(Base):
     customer_phone = Column(String(20), nullable=False)
     amount_due = Column(Float, nullable=False)
     due_date = Column(String(30), nullable=False)
-    status = Column(String(30), default="UNPAID")  # UNPAID, REMINDER_SENT, SETTLED
+    status = Column(String(30), default="UNPAID")  # UNPAID, SETTLED; reminder preparation does not change settlement state
     paytm_payment_link = Column(Text, nullable=False)
     payment_link_id = Column(String(50), nullable=False)
     created_at = Column(DateTime, default=get_utc_now)
@@ -75,5 +75,5 @@ class RestockOrder(Base):
     supplier_name = Column(String(120), nullable=False)
     supplier_phone = Column(String(20), nullable=False)
     items = Column(JSON, nullable=False)  # list of {"sku": str, "quantity": int, "expected_rate": float}
-    status = Column(String(30), default="DRAFT")  # DRAFT, DISPATCHED_WHATSAPP, CONFIRMED
+    status = Column(String(30), default="DRAFT_READY")  # Draft saved locally; WhatsApp dispatch is a separate merchant action
     created_at = Column(DateTime, default=get_utc_now)

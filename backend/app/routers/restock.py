@@ -32,11 +32,14 @@ async def analyze_invoice(
         image_bytes = await file.read()
         filename = file.filename
 
-    analysis = await analyze_invoice_image(
-        image_bytes=image_bytes,
-        db_session=db,
-        filename=filename
-    )
+    try:
+        analysis = await analyze_invoice_image(
+            image_bytes=image_bytes,
+            db_session=db,
+            filename=filename
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     # Broadcast event so WhatsApp simulator updates in real time
     await sse_manager.broadcast("INVOICE_ANALYZED", {
@@ -88,7 +91,7 @@ async def send_purchase_order(request: SendPORequest, db: AsyncSession = Depends
         order.supplier_name = request.supplier_name
         order.supplier_phone = request.supplier_phone
         order.items = request.items
-        order.status = "DISPATCHED_WHATSAPP"
+        order.status = "DRAFT_READY"
     else:
         order = RestockOrder(
             id=str(uuid.uuid4()),
@@ -96,7 +99,7 @@ async def send_purchase_order(request: SendPORequest, db: AsyncSession = Depends
             supplier_name=request.supplier_name,
             supplier_phone=request.supplier_phone,
             items=request.items,
-            status="DISPATCHED_WHATSAPP"
+            status="DRAFT_READY"
         )
         db.add(order)
 
@@ -104,7 +107,7 @@ async def send_purchase_order(request: SendPORequest, db: AsyncSession = Depends
     await db.refresh(order)
 
     # Broadcast event
-    await sse_manager.broadcast("PO_DISPATCHED", {
+    await sse_manager.broadcast("PO_DRAFT_READY", {
         "po_number": order.po_number,
         "supplier": order.supplier_name,
         "whatsapp_preview": whatsapp_data["message"]
@@ -112,7 +115,7 @@ async def send_purchase_order(request: SendPORequest, db: AsyncSession = Depends
 
     return RestockOrderResponse(
         success=True,
-        message=f"Purchase order {order.po_number} successfully dispatched to {order.supplier_name} via WhatsApp",
+        message=f"Purchase order {order.po_number} draft saved for {order.supplier_name}; send it from WhatsApp to dispatch",
         po_number=order.po_number,
         status=order.status,
         whatsapp_preview=whatsapp_data["message"]
