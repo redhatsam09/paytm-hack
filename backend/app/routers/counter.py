@@ -25,7 +25,8 @@ async def create_invoice(request: CreateInvoiceRequest, db: AsyncSession = Depen
     """
     global active_counter_state
 
-    invoice_id = f"INV-{random.randint(1000, 9999)}"
+    # Generate collision-free unique invoice ID
+    invoice_id = f"INV-{uuid.uuid4().hex[:6].upper()}"
     upi_string = generate_paytm_upi_string(
         amount=request.upi_due,
         invoice_id=invoice_id,

@@ -1,8 +1,13 @@
 import re
 import time
+import json
+import logging
 from datetime import datetime, timedelta
 from typing import Dict, Any, Tuple, Optional
 from app.schemas import VoiceParseData, VoiceParseResponse
+from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 WEEKDAYS = {
     "monday": 0, "somwar": 0, "somvaar": 0,
@@ -75,11 +80,35 @@ def extract_customer_name(text: str) -> Optional[str]:
         if name.lower() not in ["customer", "bill", "total", "aaj", "kal"]:
             return name
 
-    # Pattern: Common Indian names at the end or before due date
-    known_names = ["Ramesh", "Suresh", "Mahesh", "Rajesh", "Priya", "Amit", "Rahul", "Vijay", "Anita", "Deepak", "Vikram", "Ganesh", "Kiran"]
+    # Pattern: Common Indian names
+    known_names = [
+        "Ramesh", "Suresh", "Mahesh", "Rajesh", "Priya", "Amit", "Rahul", "Vijay",
+        "Anita", "Deepak", "Vikram", "Ganesh", "Kiran", "Sayandeep", "Sandeep", "Aman",
+        "Rohan", "Pooja", "Neha", "Anil", "Sunil", "Kavita", "Ravi", "Manish"
+    ]
     for kn in known_names:
         if re.search(r'\b' + re.escape(kn) + r'\b', text, re.IGNORECASE):
             return kn
+
+    # Pattern: Name at start of sentence e.g. "Sayandeep 500", "Rahul bill 650"
+    start_match = re.match(r'^\s*([A-Za-z]{3,20})\b', text)
+    if start_match:
+        cand = start_match.group(1).capitalize()
+        excluded = [
+            "customer", "bill", "total", "upi", "cash", "credit", "udhari", "rokkad",
+            "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
+            "somwar", "mangal", "budh", "guru", "shukra", "shani", "ravi", "kal", "aaj"
+        ]
+        if cand.lower() not in excluded:
+            return cand
+
+    # Pattern: Name after 'for' or at end e.g. 'credit for Monday, Rahul' or 'udhari to Sayandeep'
+    end_match = re.search(r'(?:for|to|naam|name)?\s*([A-Z][a-zA-Z]{2,15})\s*$', text.strip())
+    if end_match:
+        cand2 = end_match.group(1).capitalize()
+        excluded2 = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday", "today", "tomorrow"]
+        if cand2.lower() not in excluded2:
+            return cand2
 
     return None
 
@@ -153,6 +182,16 @@ def parse_voice_text(text: str) -> VoiceParseData:
             total_bill = upi_amount
         elif udhari_amount > 0.0 and upi_amount == 0.0:
             total_bill = udhari_amount
+        else:
+            # Check for any standalone amount e.g. "Sayandeep 500", "Pooja 200"
+            all_nums = re.findall(r'\b(\d+(?:\.\d+)?)\b', clean_text)
+            for num_str in all_nums:
+                if len(num_str) < 9:  # exclude phone numbers
+                    val = float(num_str)
+                    if val > 0:
+                        total_bill = val
+                        upi_amount = val
+                        break
 
     # 6. Reconcile total with components if one is missing
     if total_bill > 0.0:
@@ -193,6 +232,55 @@ def parse_voice_text(text: str) -> VoiceParseData:
         items=items
     )
 
+async def parse_with_groq(text: str) -> Optional[VoiceParseData]:
+    """Call Groq Llama-3.3-70B-versatile for high-accuracy Indic intent parsing."""
+    if not settings.GROQ_API_KEY:
+        return None
+    try:
+        from groq import AsyncGroq
+        client = AsyncGroq(api_key=settings.GROQ_API_KEY)
+        
+        today_str = datetime.now().strftime("%Y-%m-%d (%A)")
+        system_prompt = (
+            f"You are an ultra-fast entity parser for Indian Kirana store checkouts.\n"
+            f"Today's date is {today_str}.\n"
+            f"Extract checkout entities from user speech (Hindi, Hinglish, Tamil, Telugu, English) into JSON.\n"
+            f"Output strictly valid JSON with these keys:\n"
+            f'{{"total_bill": float, "upi_amount": float, "udhari_amount": float, "cash_amount": float, "due_date": string or null (format YYYY-MM-DD), "customer_name": string or null, "customer_phone": string or null (10-digit number), "items": list of strings}}'
+        )
+        
+        completion = await client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": text}
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.0,
+            max_tokens=256,
+            timeout=2.0
+        )
+        content = completion.choices[0].message.content
+        if content:
+            raw = json.loads(content)
+            udhari = float(raw.get("udhari_amount") or 0.0)
+            data = VoiceParseData(
+                total_bill=float(raw.get("total_bill") or 0.0),
+                upi_amount=float(raw.get("upi_amount") or 0.0),
+                udhari_amount=udhari,
+                cash_amount=float(raw.get("cash_amount") or 0.0),
+                due_date=raw.get("due_date") or (calculate_due_date(text) if udhari > 0 else None),
+                customer_name=raw.get("customer_name") or extract_customer_name(text),
+                customer_phone=raw.get("customer_phone") or extract_phone_number(text),
+                items=raw.get("items") or []
+            )
+            if data.total_bill == 0.0 and (data.upi_amount > 0 or data.udhari_amount > 0):
+                data.total_bill = round(data.upi_amount + data.udhari_amount + data.cash_amount, 2)
+            return data
+    except Exception as e:
+        logger.warning(f"Groq intent parsing failed or timed out ({e}), falling back to regex: {e}")
+        return None
+
 async def parse_voice_command(
     transcript_text: Optional[str] = None,
     audio_base64: Optional[str] = None,
@@ -206,7 +294,11 @@ async def parse_voice_command(
         transcript_text = "Customer bill 650, 400 UPI now, 250 udhari for Monday, Ramesh 9876543210"
 
     text = transcript_text or ""
-    data = parse_voice_text(text)
+    data = None
+    if settings.GROQ_API_KEY:
+        data = await parse_with_groq(text)
+    if not data:
+        data = parse_voice_text(text)
 
     duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
 

@@ -48,28 +48,59 @@ async def analyze_invoice_image(
             from google.genai import types
 
             client = genai.Client(api_key=settings.GEMINI_API_KEY)
+            
+            mime_type = "image/jpeg"
+            if filename:
+                fn_lower = filename.lower()
+                if fn_lower.endswith(".png"):
+                    mime_type = "image/png"
+                elif fn_lower.endswith(".webp"):
+                    mime_type = "image/webp"
+                elif fn_lower.endswith(".pdf"):
+                    mime_type = "application/pdf"
+
             prompt = """
-            You are an expert OCR parser for Indian wholesale Kirana store invoices.
-            Analyze this invoice and extract:
-            1. vendor_name (string)
+            You are an expert OCR parser for Indian wholesale Kirana store distributor invoices.
+            Analyze this invoice image and extract:
+            1. vendor_name (string, name of distributor or wholesaler)
             2. invoice_no (string)
             3. invoice_date (YYYY-MM-DD)
             4. items: list of objects with "sku" (name of product), "quantity" (integer), and "unit_rate" (float)
-            Return strictly valid JSON only.
+            Return strictly valid JSON only without markdown or code blocks.
             """
-            response = client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=[
-                    types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
-                    prompt
-                ]
-            )
-            parsed_json = json.loads(response.text.strip().replace("```json", "").replace("```", ""))
-            if "vendor_name" in parsed_json:
+            
+            try:
+                response = client.models.generate_content(
+                    model="gemini-2.5-flash",
+                    contents=[
+                        types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
+                        prompt
+                    ]
+                )
+            except Exception:
+                # Fallback to gemini-2.0-flash if 2.5 is not accessible
+                response = client.models.generate_content(
+                    model="gemini-2.0-flash",
+                    contents=[
+                        types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
+                        prompt
+                    ]
+                )
+
+            clean_resp = response.text.strip()
+            if "```json" in clean_resp:
+                clean_resp = clean_resp.split("```json")[1].split("```")[0].strip()
+            elif "```" in clean_resp:
+                clean_resp = clean_resp.split("```")[1].split("```")[0].strip()
+
+            parsed_json = json.loads(clean_resp)
+            if "vendor_name" in parsed_json and parsed_json["vendor_name"]:
                 vendor_name = parsed_json["vendor_name"]
-            if "invoice_no" in parsed_json:
+            if "invoice_no" in parsed_json and parsed_json["invoice_no"]:
                 invoice_no = parsed_json["invoice_no"]
-            if "items" in parsed_json and isinstance(parsed_json["items"], list):
+            if "invoice_date" in parsed_json and parsed_json["invoice_date"]:
+                invoice_date = parsed_json["invoice_date"]
+            if "items" in parsed_json and isinstance(parsed_json["items"], list) and len(parsed_json["items"]) > 0:
                 raw_items = parsed_json["items"]
         except Exception as e:
             print(f"Notice: Gemini API call failed or timed out ({e}), using robust Kirana OCR engine.")

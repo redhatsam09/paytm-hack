@@ -2,28 +2,26 @@
 
 import React, { useState, useEffect } from 'react';
 import { TopNavbar } from '@/components/TopNavbar';
-import { UnifiedWorkflow } from '@/components/UnifiedWorkflow';
-import { ApiSettingsModal } from '@/components/ApiSettingsModal';
+import { CheckoutTerminal } from '@/components/CheckoutTerminal';
 import { checkBackendHealth, subscribeToEvents } from '@/lib/api';
 
 export default function Home() {
   const [backendConnected, setBackendConnected] = useState<boolean>(true);
-  const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
 
   useEffect(() => {
-    // Check initial backend health
+    // Initial health check
     const checkStatus = async () => {
       const isUp = await checkBackendHealth();
       setBackendConnected(isUp);
     };
     checkStatus();
 
-    // Subscribe to SSE real-time notifications
+    // Subscribe to SSE
     const unsubscribeSSE = subscribeToEvents((event) => {
-      console.log('Real-time event from backend:', event);
+      console.log('Real-time event:', event);
     });
 
-    // Periodic health heartbeat
+    // Heartbeat
     const interval = setInterval(async () => {
       const isUp = await checkBackendHealth();
       setBackendConnected(isUp);
@@ -36,26 +34,17 @@ export default function Home() {
   }, []);
 
   return (
-    <div className="min-h-screen bg-[#fcfcfc] text-[#3d3d3d] flex flex-col font-sans relative">
-      {/* Soft atmospheric halo glow */}
-      <div className="halo-glow" />
+    <div className="min-h-screen bg-[#fcfcfc] text-[#3d3d3d] flex flex-col font-sans relative selection:bg-[#3a3f5c] selection:text-white">
+      {/* Subtle atmospheric halo glow */}
+      <div className="halo-glow pointer-events-none" />
 
-      {/* Top Navigation Bar */}
-      <TopNavbar
-        backendConnected={backendConnected}
-        onOpenSettings={() => setIsSettingsOpen(true)}
-      />
+      {/* Clean quiet navbar (without any API keys triggers) */}
+      <TopNavbar backendConnected={backendConnected} />
 
-      {/* Single Unified Natural Workflow */}
-      <main className="flex-1 relative z-10">
-        <UnifiedWorkflow />
+      {/* Single focused step-by-step terminal */}
+      <main className="flex-1 relative z-10 flex flex-col justify-center py-6 sm:py-10">
+        <CheckoutTerminal />
       </main>
-
-      {/* Pluggable API Keys Drawer / Modal */}
-      <ApiSettingsModal
-        isOpen={isSettingsOpen}
-        onClose={() => setIsSettingsOpen(false)}
-      />
     </div>
   );
 }
