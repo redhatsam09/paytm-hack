@@ -150,6 +150,40 @@ async def test_paytm_webhook_shortfall_mismatch():
         assert data["audio_base64"] is not None
 
 @pytest.mark.asyncio
+async def test_udhari_reconcile_validates_amount_and_duplicate_settlement():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        create_resp = await client.post(
+            "/api/udhari/create",
+            json={
+                "customer_name": "Validation Customer",
+                "customer_phone": "9876543210",
+                "amount_due": 125.0,
+                "due_date": "2026-11-20",
+            },
+        )
+        assert create_resp.status_code == 200
+        udhari_id = create_resp.json()["id"]
+
+        partial_resp = await client.post(
+            "/api/udhari/reconcile",
+            json={"udhari_id": udhari_id, "utr": "PARTIAL", "amount_paid": 100.0},
+        )
+        assert partial_resp.status_code == 422
+
+        settle_resp = await client.post(
+            "/api/udhari/reconcile",
+            json={"udhari_id": udhari_id, "utr": "EXACT", "amount_paid": 125.0},
+        )
+        assert settle_resp.status_code == 200
+
+        duplicate_resp = await client.post(
+            "/api/udhari/reconcile",
+            json={"udhari_id": udhari_id, "utr": "EXACT", "amount_paid": 125.0},
+        )
+        assert duplicate_resp.status_code == 409
+
+@pytest.mark.asyncio
 async def test_udhari_lifecycle():
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -189,6 +223,8 @@ async def test_restock_analyzer_and_price_hike():
         assert resp.status_code == 200
         data = resp.json()
         assert data["success"] is True
+        assert data["analysis_source"] == "LOCAL_FIXTURE"
+        assert "no external OCR" in data["validation_note"]
         assert len(data["items"]) >= 3
 
         # Verify price hike detection on Fortune Sunflower Oil (155 vs 140 historical = +10.7%)

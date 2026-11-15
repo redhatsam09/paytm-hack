@@ -12,8 +12,8 @@ def generate_paytm_upi_string(
     note: str = None
 ) -> str:
     """
-    Generate an NPCI / Paytm Dynamic Amount-Locked UPI payment string.
-    The customer's UPI app cannot alter the amount field.
+    Generate an explicitly non-payable local demo QR payload.
+    Real amount-locked payment QRs must come from Paytm's authenticated API.
     """
     vpa = merchant_vpa or settings.DEFAULT_MERCHANT_VPA
     pn = merchant_name or settings.DEFAULT_MERCHANT_NAME

@@ -3,6 +3,7 @@ import time
 import json
 import base64
 import logging
+import httpx
 from datetime import datetime, timedelta
 from typing import Dict, Any, Tuple, Optional
 from app.schemas import VoiceParseData, VoiceParseResponse
@@ -282,6 +283,26 @@ async def parse_with_groq(text: str) -> Optional[VoiceParseData]:
         logger.warning(f"Groq intent parsing failed or timed out ({e}), falling back to regex: {e}")
         return None
 
+async def transcribe_with_sarvam(audio_bytes: bytes, filename: str = "recording.webm") -> Optional[str]:
+    """Transcribe an utterance with Sarvam Saaras, detecting Hindi/Hinglish/English."""
+    if not settings.SARVAM_API_KEY:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.post(
+                "https://api.sarvam.ai/speech-to-text",
+                headers={"api-subscription-key": settings.SARVAM_API_KEY},
+                data={"model": "saaras:v4", "mode": "transcribe", "language_code": "unknown"},
+                files={"file": (filename, audio_bytes, "audio/webm")},
+            )
+        response.raise_for_status()
+        transcript = response.json().get("transcript", "").strip()
+        return transcript or None
+    except Exception as e:
+        logger.warning("Sarvam speech transcription failed (%s)", type(e).__name__)
+        return None
+
+
 async def transcribe_with_groq_whisper(audio_bytes: bytes, filename: str = "audio.webm") -> Optional[str]:
     """Transcribe real spoken audio into text using Groq Whisper-large-v3-turbo."""
     if not settings.GROQ_API_KEY:
@@ -295,7 +316,6 @@ async def transcribe_with_groq_whisper(audio_bytes: bytes, filename: str = "audi
             response_format="json"
         )
         result_text = transcription.text.strip() if hasattr(transcription, "text") else str(transcription).strip()
-        logger.info(f"Groq Whisper successfully transcribed: {result_text}")
         return result_text
     except Exception as e:
         logger.error(f"Groq Whisper transcription error: {e}")
@@ -319,9 +339,9 @@ async def parse_voice_command(
             logger.warning(f"Failed to decode audio base64: {e}")
 
     if audio_bytes and not transcript_text:
-        whisper_text = await transcribe_with_groq_whisper(audio_bytes, filename=filename)
-        if whisper_text:
-            transcript_text = whisper_text
+        transcript_text = await transcribe_with_sarvam(audio_bytes, filename=filename)
+        if not transcript_text:
+            transcript_text = await transcribe_with_groq_whisper(audio_bytes, filename=filename)
 
     text = (transcript_text or "").strip()
     data = None

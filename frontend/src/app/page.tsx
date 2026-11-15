@@ -2,8 +2,8 @@
 
 import React, { useState, useEffect } from 'react';
 import { TopNavbar } from '@/components/TopNavbar';
-import { CheckoutTerminal } from '@/components/CheckoutTerminal';
-import { checkBackendHealth, subscribeToEvents } from '@/lib/api';
+import { DualDeviceSimulator } from '@/components/DualDeviceSimulator';
+import { checkBackendHealth } from '@/lib/api';
 
 export default function Home() {
   const [backendConnected, setBackendConnected] = useState<boolean>(true);
@@ -16,21 +16,13 @@ export default function Home() {
     };
     checkStatus();
 
-    // Subscribe to SSE
-    const unsubscribeSSE = subscribeToEvents((event) => {
-      console.log('Real-time event:', event);
-    });
-
-    // Heartbeat
+    // Heartbeat polling
     const interval = setInterval(async () => {
       const isUp = await checkBackendHealth();
       setBackendConnected(isUp);
     }, 6000);
 
-    return () => {
-      clearInterval(interval);
-      unsubscribeSSE();
-    };
+    return () => clearInterval(interval);
   }, []);
 
   return (
@@ -38,12 +30,12 @@ export default function Home() {
       {/* Subtle atmospheric halo glow */}
       <div className="halo-glow pointer-events-none" />
 
-      {/* Clean quiet navbar (without any API keys triggers) */}
+      {/* Clean quiet navbar */}
       <TopNavbar backendConnected={backendConnected} />
 
-      {/* Single focused step-by-step terminal */}
-      <main className="flex-1 relative z-10 flex flex-col justify-center py-6 sm:py-10">
-        <CheckoutTerminal />
+      {/* Dual-Device Stage Simulator */}
+      <main className="flex-1 relative z-10 flex flex-col justify-center py-4 sm:py-6">
+        <DualDeviceSimulator />
       </main>
     </div>
   );

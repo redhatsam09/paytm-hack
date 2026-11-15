@@ -26,8 +26,8 @@ async def transcribe_audio_endpoint(
     language: str = Form("hi")
 ):
     """
-    Accepts live microphone audio recording from frontend,
-    transcribes via Groq Whisper in sub-200ms, and parses checkout entities.
+    Accepts a short microphone recording, transcribes with Sarvam Saaras when
+    configured (Groq Whisper fallback), then parses checkout entities.
     """
     audio_bytes = await file.read()
     filename = file.filename or "recording.webm"

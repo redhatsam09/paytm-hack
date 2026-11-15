@@ -1,25 +1,62 @@
 from datetime import datetime, timezone
-from fastapi import APIRouter, Depends, HTTPException
+import hashlib
+import hmac
+import json
+import secrets
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc
 from app.database import get_db
 from app.models import Transaction, UdhariLedger
-from app.schemas import WebhookPayload, WebhookResponse
+from app.schemas import DemoFixtureRequest, WebhookPayload, WebhookResponse
 from app.services.tts_service import get_payment_success_audio, get_shortfall_warning_audio
 from app.services.sse_manager import sse_manager
 from app.services.whatsapp_service import format_udhari_whatsapp_message
 from app.routers.counter import active_counter_state
+from app.config import settings, paytm_live_ready
+from app.services.paytm_gateway import fetch_transaction_status, verify_callback_signature
 
 router = APIRouter(prefix="/paytm", tags=["Paytm Webhook & Spoof Guard"])
+_DEMO_FIXTURE_KEY = secrets.token_bytes(32)
 
-@router.post("/webhook", response_model=WebhookResponse)
-async def paytm_webhook_receiver(payload: WebhookPayload, db: AsyncSession = Depends(get_db)):
+def _fixture_signature(event: dict) -> str:
+    canonical = json.dumps(event, sort_keys=True, separators=(",", ":")).encode()
+    return hmac.new(_DEMO_FIXTURE_KEY, canonical, hashlib.sha256).hexdigest()
+
+def _verify_fixture_signature(event: dict, signature: str) -> bool:
+    return hmac.compare_digest(_fixture_signature(event), signature)
+
+@router.post("/demo-fixture", response_model=WebhookResponse)
+async def replay_demo_fixture(request: DemoFixtureRequest, db: AsyncSession = Depends(get_db)):
     """
-    Real-time Paytm UPI Webhook listener.
-    Reconciles incoming UTR against active invoice:
-    - Full payment: Announces 'Paytm par ₹400 prapt hue', broadcasts green tick, triggers WhatsApp Udhari link.
-    - Short payment / Spoof: Announces 'Savdhaan! Keval ₹40 prapt hue...', flashes red screen alarm.
+    Generate a fixed, server-side signed fixture to exercise reconciliation.
+    This local adapter is not a Paytm signature and does not prove money moved.
     """
+    if paytm_live_ready():
+        raise HTTPException(status_code=409, detail="Local fixture replay is disabled while Paytm credentials are configured")
+    txn = await db.scalar(select(Transaction).where(Transaction.invoice_id == request.invoice_id))
+    if not txn:
+        raise HTTPException(status_code=404, detail="Fixture invoice was not found")
+    if txn.payment_mode == "PAYTM_DYNAMIC_QR":
+        raise HTTPException(status_code=409, detail="A live Paytm invoice cannot use a local fixture")
+    if txn.status not in {"PENDING_PAYMENT", "SHORT_PAYMENT"}:
+        raise HTTPException(status_code=409, detail="This invoice is already settled")
+
+    amount = float(txn.upi_due) if request.scenario == "exact_match" else min(40.0, max(0.01, float(txn.upi_due) / 2))
+    event = {
+        "invoice_id": txn.invoice_id,
+        "scenario": request.scenario,
+        "amount": round(amount, 2),
+        "utr": f"FIXTURE-{secrets.token_hex(8).upper()}",
+    }
+    signature = _fixture_signature(event)
+    if not _verify_fixture_signature(event, signature):
+        raise HTTPException(status_code=401, detail="Local fixture signature validation failed")
+    payload = WebhookPayload(invoice_id=event["invoice_id"], amount=event["amount"], utr=event["utr"])
+    return await _process_payment_event(payload, db)
+
+
+async def _process_payment_event(payload: WebhookPayload, db: AsyncSession):
     import app.routers.counter as counter_module
 
     # 1. Identify the invoice to reconcile
@@ -49,8 +86,26 @@ async def paytm_webhook_receiver(payload: WebhookPayload, db: AsyncSession = Dep
         expected_amount = txn.upi_due
         invoice_id = txn.invoice_id
 
-    # 2. Check for Shortfall vs Full Match
-    if payload.amount >= expected_amount:
+    # Paytm retries S2S notifications. Do not replay the merchant alarm/chime
+    # or process the same bank reference twice.
+    if txn and payload.utr and txn.utr == payload.utr and txn.status in {"COMPLETED", "SHORT_PAYMENT"}:
+        paid = float(txn.upi_received or 0)
+        is_match = txn.status == "COMPLETED"
+        deficit = max(0.0, round(expected_amount - paid, 2))
+        return WebhookResponse(
+            status="SUCCESS" if is_match else "SHORTFALL_ALERT",
+            alert_type="PAYMENT_SUCCESS" if is_match else "SHORT_PAYMENT",
+            invoice_id=invoice_id,
+            amount_received=paid,
+            amount_expected=expected_amount,
+            deficit=0 if is_match else deficit,
+            message="Duplicate Paytm notification acknowledged" if is_match else f"Payment mismatch remains: ₹{deficit:.2f} due",
+            voice_alert="Payment already verified" if is_match else f"Savdhaan! ₹{deficit:.2f} baaki hai!",
+        )
+
+    # The caller supplies either fields verified from Paytm's signed status API,
+    # or a server-generated local fixture. Only an exact amount closes the bill.
+    if abs(payload.amount - expected_amount) < 0.005:
         # Full payment success
         if txn:
             txn.status = "COMPLETED"
@@ -108,7 +163,7 @@ async def paytm_webhook_receiver(payload: WebhookPayload, db: AsyncSession = Dep
         )
     else:
         # Short payment detected!
-        deficit = round(expected_amount - payload.amount, 2)
+        deficit = max(0.0, round(expected_amount - payload.amount, 2))
         if txn:
             txn.status = "SHORT_PAYMENT"
             txn.upi_received = payload.amount
@@ -148,3 +203,66 @@ async def paytm_webhook_receiver(payload: WebhookPayload, db: AsyncSession = Dep
             audio_base64=b64_audio,
             audio_url=audio_url
         )
+
+
+@router.post("/webhook")
+async def paytm_webhook_receiver(request: Request, db: AsyncSession = Depends(get_db)):
+    """Verify a live callback, or run the explicit local JSON adapter without keys."""
+    content_type = request.headers.get("content-type", "").lower()
+    if not paytm_live_ready():
+        if "application/json" not in content_type:
+            raise HTTPException(
+                status_code=503,
+                detail="Paytm callback verification is not configured; use /demo-fixture for a local test",
+            )
+        try:
+            payload = WebhookPayload.model_validate(await request.json())
+        except Exception as exc:
+            raise HTTPException(status_code=422, detail=f"Invalid local demo webhook: {exc}") from exc
+        if not payload.invoice_id:
+            raise HTTPException(status_code=422, detail="Local demo webhook requires invoice_id")
+        txn = await db.scalar(select(Transaction).where(Transaction.invoice_id == payload.invoice_id))
+        if not txn:
+            raise HTTPException(status_code=404, detail="Demo invoice was not found")
+        if txn.payment_mode != "DEMO":
+            raise HTTPException(status_code=409, detail="Live Paytm invoices require a signed callback")
+        return await _process_payment_event(payload, db)
+
+    fields = {str(key): str(value) for key, value in (await request.form()).items()}
+    if not verify_callback_signature(fields):
+        raise HTTPException(status_code=401, detail="Invalid Paytm callback checksum")
+
+    order_id = fields.get("ORDERID") or fields.get("orderId")
+    callback_mid = fields.get("MID") or fields.get("mid")
+    if not order_id or callback_mid != settings.PAYTM_MID:
+        raise HTTPException(status_code=400, detail="Callback merchant or order does not match")
+    txn = await db.scalar(select(Transaction).where(Transaction.invoice_id == order_id))
+    if not txn:
+        raise HTTPException(status_code=404, detail="Paytm callback order was not found")
+    if txn.payment_mode != "PAYTM_DYNAMIC_QR":
+        raise HTTPException(status_code=409, detail="Callback does not belong to a Paytm Dynamic QR order")
+
+    try:
+        verified = await fetch_transaction_status(order_id)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Paytm status confirmation failed: {exc}") from exc
+    verified_order = verified.get("orderId") or verified.get("ORDERID")
+    verified_mid = verified.get("mid") or verified.get("MID")
+    verified_status = verified.get("resultInfo", {}).get("resultStatus") or verified.get("resultStatus")
+    verified_amount = verified.get("txnAmount") or verified.get("TXNAMOUNT")
+    if verified_order != order_id or verified_mid != settings.PAYTM_MID:
+        raise HTTPException(status_code=502, detail="Paytm status response did not match this merchant order")
+    if verified_status != "TXN_SUCCESS":
+        return {"status": verified_status or "PENDING", "order_id": order_id, "verification_source": "PAYTM_TRANSACTION_STATUS"}
+    if verified_amount is None:
+        raise HTTPException(status_code=502, detail="Paytm success response did not include a transaction amount")
+
+    # Route verified gateway fields through the shared reconciliation/announcement logic.
+    verified_payload = WebhookPayload(
+        merchant_vpa=settings.DEFAULT_MERCHANT_VPA,
+        utr=str(verified.get("bankTxnId") or verified.get("BANKTXNID") or verified.get("txnId") or verified.get("TXNID") or ""),
+        amount=float(verified_amount),
+        status=verified_status,
+        invoice_id=order_id,
+    )
+    return await _process_payment_event(verified_payload, db)

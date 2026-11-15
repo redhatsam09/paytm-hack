@@ -36,6 +36,7 @@ class Transaction(Base):
     utr = Column(String(100), nullable=True)
     qr_data = Column(Text, nullable=False)
     qr_code_url = Column(Text, nullable=False)
+    payment_mode = Column(String(30), nullable=False, default="DEMO")
     created_at = Column(DateTime, default=get_utc_now)
     completed_at = Column(DateTime, nullable=True)
 

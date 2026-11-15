@@ -31,21 +31,24 @@ import {
   parseVoiceCommand,
   transcribeAudioRecording,
   createCounterInvoice,
-  triggerPaytmWebhook,
+  replayDemoPaymentFixture,
   sendUdhariReminder,
   reconcileUdhariPayment,
   analyzeDistributorInvoice,
   sendPurchaseOrder,
+  checkPaytmPaymentStatus,
+  subscribeToEvents,
 } from '@/lib/api';
 import { playPaytmChime, playAlertSiren, speakAnnouncement } from '@/lib/audio';
 
 type TerminalStep = 1 | 2 | 3 | 4;
+type PaymentTraceItem = { label: string; detail: string; result: 'pass' | 'warn' | 'info' };
 
 export const CheckoutTerminal: React.FC = () => {
   const [currentStep, setCurrentStep] = useState<TerminalStep>(1);
 
   // Step 1: Voice Input & Intent Split
-  const [transcript, setTranscript] = useState<string>('');
+  const [transcript, setTranscript] = useState<string>('Customer bill ₹650 — ₹400 UPI now, ₹250 udhari for Monday, Rahul 9876543210');
   const [isListening, setIsListening] = useState<boolean>(false);
   const [isProcessingVoice, setIsProcessingVoice] = useState<boolean>(false);
   const [voiceStatusText, setVoiceStatusText] = useState<string>('');
@@ -54,14 +57,59 @@ export const CheckoutTerminal: React.FC = () => {
   // Audio Recording Refs for real microphone capture
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
+  const recordingLimitTimerRef = useRef<number | null>(null);
 
   // Step 2: Dynamic QR & Dual-Screen Soundbox
   const [activeInvoice, setActiveInvoice] = useState<InvoiceData | null>(null);
   const [isGeneratingInvoice, setIsGeneratingInvoice] = useState<boolean>(false);
   const [secondsRemaining, setSecondsRemaining] = useState<number>(180);
-  const [receivedAmountInput, setReceivedAmountInput] = useState<string>('400.00');
   const [isVerifyingPayment, setIsVerifyingPayment] = useState<boolean>(false);
+  const [gatewayCheckMessage, setGatewayCheckMessage] = useState<string>('');
   const [paymentResult, setPaymentResult] = useState<WebhookResponse | null>(null);
+  const [paymentTrace, setPaymentTrace] = useState<PaymentTraceItem[]>([]);
+
+  useEffect(() => {
+    if (activeInvoice?.payment_mode !== 'PAYTM_DYNAMIC_QR') return;
+    return subscribeToEvents((event) => {
+      const data = event.data as Record<string, unknown> | undefined;
+      if (!data || data.invoice_id !== activeInvoice.invoice_id) return;
+      if (event.event_type === 'PAYMENT_SUCCESS') {
+        const amount = Number(data.amount_paid || 0);
+        setPaymentResult({
+          status: 'SUCCESS', alert_type: 'PAYMENT_SUCCESS', invoice_id: activeInvoice.invoice_id,
+          amount_received: amount, amount_expected: Number(data.expected_amount || activeInvoice.upi_due), deficit: 0,
+          message: 'Payment confirmed by Paytm’s signed server callback and status check.',
+          voice_alert: String(data.voice_alert || `Paytm par ₹${amount} prapt hue`),
+        });
+        setGatewayCheckMessage('Paytm confirmed payment. Bill settled automatically.');
+        setPaymentTrace([
+          { label: 'Paytm callback', detail: 'Signed callback accepted by the server', result: 'pass' },
+          { label: 'Order verification', detail: 'Paytm Transaction Status API returned TXN_SUCCESS', result: 'pass' },
+          { label: 'Amount guard', detail: `₹${amount.toFixed(2)} matched the locked ₹${activeInvoice.upi_due.toFixed(2)}`, result: 'pass' },
+          { label: 'Soundbox', detail: 'Payment confirmed and merchant chime played', result: 'pass' },
+        ]);
+        playPaytmChime();
+        speakAnnouncement(String(data.voice_alert || `Paytm par ₹${amount} prapt hue`), 'hi');
+      } else if (event.event_type === 'SHORTFALL_ALERT') {
+        const amount = Number(data.amount_paid || 0);
+        const deficit = Number(data.deficit || 0);
+        setPaymentResult({
+          status: 'SHORTFALL_ALERT', alert_type: 'SHORT_PAYMENT', invoice_id: activeInvoice.invoice_id,
+          amount_received: amount, amount_expected: Number(data.expected_amount || activeInvoice.upi_due), deficit,
+          message: 'Paytm confirmed a payment mismatch.', voice_alert: String(data.voice_alert || `Savdhaan! ₹${deficit} baaki hai!`),
+        });
+        setGatewayCheckMessage('Paytm confirmed an amount mismatch.');
+        setPaymentTrace([
+          { label: 'Paytm callback', detail: 'Signed callback accepted by the server', result: 'pass' },
+          { label: 'Order verification', detail: 'Paytm Transaction Status API confirmed the transaction', result: 'pass' },
+          { label: 'Amount guard', detail: `Expected ₹${activeInvoice.upi_due.toFixed(2)}, received ₹${amount.toFixed(2)}`, result: 'warn' },
+          { label: 'Soundbox', detail: `Shortfall alarm raised: ₹${deficit.toFixed(2)} remains`, result: 'warn' },
+        ]);
+        playAlertSiren();
+        speakAnnouncement(String(data.voice_alert || `Savdhaan! ₹${deficit} baaki hai!`), 'hi');
+      }
+    });
+  }, [activeInvoice?.invoice_id, activeInvoice?.payment_mode, activeInvoice?.upi_due]);
 
   // Step 3: Partial Udhari Recovery
   const [reminderSent, setReminderSent] = useState<boolean>(false);
@@ -92,27 +140,30 @@ export const CheckoutTerminal: React.FC = () => {
   const executeCommand = async (text: string) => {
     if (!text.trim()) return;
     setIsProcessingVoice(true);
-    setVoiceStatusText('Analyzing split bill with Groq...');
+    setVoiceStatusText('Vani is understanding the bill...');
     setPaymentResult(null);
     try {
       const res = await parseVoiceCommand(text);
-      if (res.data) {
+      if (res.data && res.data.total_bill > 0 && (res.data.upi_amount + res.data.udhari_amount + res.data.cash_amount) > 0) {
         setParsedData(res.data);
-        setReceivedAmountInput(res.data.upi_amount.toFixed(2));
+        setVoiceStatusText(`Bill understood: ₹${res.data.total_bill} total, ₹${res.data.upi_amount} UPI${res.data.udhari_amount ? `, ₹${res.data.udhari_amount} udhari` : ''}.`);
+      } else {
+        setVoiceStatusText(`I heard “${text}” but could not identify the bill amounts. Edit it or use the sample command.`);
       }
     } catch (err) {
       console.warn('Voice parse failed:', err);
+      setVoiceStatusText('Could not understand that request. Try the sample command or type the bill details.');
     } finally {
       setIsProcessingVoice(false);
-      setVoiceStatusText('');
     }
   };
 
-  // Push-to-Talk Mic: Real Audio MediaRecorder + Groq Whisper
+  // Push-to-talk mic: capture a full utterance, then transcribe and parse it.
   const handleToggleMic = async () => {
     if (isListening) {
       // User tapped to finish recording
       setIsListening(false);
+      if (recordingLimitTimerRef.current) window.clearTimeout(recordingLimitTimerRef.current);
       if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
         mediaRecorderRef.current.stop();
       }
@@ -120,7 +171,7 @@ export const CheckoutTerminal: React.FC = () => {
     }
 
     try {
-      setVoiceStatusText('Accessing microphone...');
+      setVoiceStatusText('Starting microphone…');
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       audioChunksRef.current = [];
 
@@ -134,37 +185,43 @@ export const CheckoutTerminal: React.FC = () => {
       };
 
       mediaRecorder.onstop = async () => {
+        if (recordingLimitTimerRef.current) window.clearTimeout(recordingLimitTimerRef.current);
         stream.getTracks().forEach((track) => track.stop());
         const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
 
         if (audioBlob.size > 200) {
           setIsProcessingVoice(true);
-          setVoiceStatusText('Transcribing speech with Groq Whisper...');
+          setVoiceStatusText('Vani is listening to your bill…');
           try {
-            const res = await transcribeAudioRecording(audioBlob);
-            if (res.transcript) {
-              setTranscript(res.transcript);
-            }
-            if (res.data) {
+            const res = await transcribeAudioRecording(audioBlob, 'hi');
+            if (res.transcript) setTranscript(res.transcript);
+            if (res.data && res.data.total_bill > 0 && (res.data.upi_amount + res.data.udhari_amount + res.data.cash_amount) > 0) {
               setParsedData(res.data);
-              setReceivedAmountInput(res.data.upi_amount.toFixed(2));
+              setVoiceStatusText(`I heard “${res.transcript}”. Bill: ₹${res.data.total_bill}, UPI ₹${res.data.upi_amount}${res.data.udhari_amount ? `, udhari ₹${res.data.udhari_amount}` : ''}.`);
+            } else if (res.transcript) {
+              setVoiceStatusText(`I heard “${res.transcript}” but could not identify the bill amounts. Edit it or use the sample command.`);
+            } else {
+              setVoiceStatusText('I could not hear the bill clearly. Try again, or use the sample command.');
             }
           } catch (err) {
             console.warn('Audio transcription error:', err);
-            // If server whisper fails, try parsing existing text
-            if (transcript.trim()) {
-              executeCommand(transcript);
-            }
+            setVoiceStatusText('Voice transcription did not complete. Try again or use the sample command below.');
           } finally {
             setIsProcessingVoice(false);
-            setVoiceStatusText('');
           }
         }
       };
 
       mediaRecorder.start(200);
       setIsListening(true);
-      setVoiceStatusText('Listening... Speak customer name, UPI amount, and udhari');
+      setVoiceStatusText('Listening… say the bill total, UPI/credit split, and customer name (max 25 seconds)');
+      recordingLimitTimerRef.current = window.setTimeout(() => {
+        if (mediaRecorder.state === 'recording') {
+          setIsListening(false);
+          setVoiceStatusText('25-second recording complete. Vani is transcribing…');
+          mediaRecorder.stop();
+        }
+      }, 25_000);
     } catch (err) {
       console.warn('Microphone permission or hardware error:', err);
       // Fallback: Web Speech API
@@ -208,7 +265,7 @@ export const CheckoutTerminal: React.FC = () => {
 
         recognition.onerror = () => {
           setIsListening(false);
-          setVoiceStatusText('Speech input timed out. You can also type below.');
+            setVoiceStatusText('Could not access speech recognition. Try again or use the sample command below.');
         };
         recognition.onend = () => setIsListening(false);
 
@@ -247,7 +304,6 @@ export const CheckoutTerminal: React.FC = () => {
       setActiveInvoice(invoice);
       setSecondsRemaining(180);
       setPaymentResult(null);
-      setReceivedAmountInput(invoice.upi_due.toFixed(2));
       setCurrentStep(2);
     } catch (err) {
       console.warn('Invoice generation failed:', err);
@@ -258,35 +314,128 @@ export const CheckoutTerminal: React.FC = () => {
   };
 
   // Step 2: Trigger Payment Webhook Simulation (Simulates buyer phone payment)
-  const handleTriggerWebhook = async (amount: number) => {
-    const invId = activeInvoice?.invoice_id || 'INV-2026-001';
+  const handleTriggerWebhook = async (scenario: 'exact_match' | 'shortfall') => {
+    if (activeInvoice?.payment_mode === 'PAYTM_DYNAMIC_QR') return;
+    if (!activeInvoice) return;
+    const invId = activeInvoice.invoice_id;
     setIsVerifyingPayment(true);
+    setGatewayCheckMessage('Server is generating and checking a fixed signed test event…');
+    setPaymentTrace([{ label: 'Local test adapter', detail: 'Server-generated fixture; no payment is initiated', result: 'info' }]);
 
     try {
-      const utr = `PAYTM${Math.floor(100000000 + Math.random() * 900000000)}`;
-      const res = await triggerPaytmWebhook({
-        utr,
-        amount,
+      const res = await replayDemoPaymentFixture({
         invoice_id: invId,
+        scenario,
       });
 
       setPaymentResult(res);
+      const isMatch = res.status === 'SUCCESS';
+      setPaymentTrace([
+        { label: 'Local fixture signature', detail: 'Backend generated an HMAC-signed fixture and validated its signature', result: 'pass' },
+        { label: 'Invoice lookup', detail: `Matched ${invId}; expected ₹${res.amount_expected.toFixed(2)}`, result: 'pass' },
+        { label: 'Amount guard', detail: `Received ₹${res.amount_received.toFixed(2)}${isMatch ? ' — exact match' : ` — ₹${res.deficit.toFixed(2)} short`}`, result: isMatch ? 'pass' : 'warn' },
+        { label: 'Soundbox response', detail: isMatch ? 'Success chime and confirmation' : 'Alarm and shortfall warning', result: isMatch ? 'pass' : 'warn' },
+        { label: 'Evidence scope', detail: 'Local test adapter only; Paytm and the bank did not confirm or receive money', result: 'info' },
+      ]);
+      setGatewayCheckMessage(isMatch ? 'Test case passed: exact amount matched the invoice.' : `Test case passed: shortfall of ₹${res.deficit.toFixed(2)} was flagged.`);
 
       if (res.status === 'SUCCESS') {
         playPaytmChime();
-        speakAnnouncement(res.voice_alert || `Paytm par ₹${amount} prapt hue`, 'hi');
+        speakAnnouncement(res.voice_alert || `Payment matched: ₹${res.amount_received}`, 'hi');
       } else {
         playAlertSiren();
         speakAnnouncement(
-          res.voice_alert || `Savdhaan! Keval ₹${amount} prapt hue hain! ₹${res.deficit} baaki hai!`,
+          res.voice_alert || `Savdhaan! Keval ₹${res.amount_received} prapt hue hain! ₹${res.deficit} baaki hai!`,
           'hi'
         );
       }
     } catch (err) {
       console.warn('Payment verification error:', err);
+      setGatewayCheckMessage(err instanceof Error ? err.message : 'Could not run local fixture. Check that the backend is running.');
     } finally {
       setIsVerifyingPayment(false);
     }
+  };
+
+  const handleCheckPaytmStatus = async () => {
+    if (!activeInvoice || isVerifyingPayment) return;
+    setIsVerifyingPayment(true);
+    setGatewayCheckMessage('Checking Paytm transaction status…');
+    try {
+      const result = await checkPaytmPaymentStatus(activeInvoice.invoice_id);
+      if (result.status === 'COMPLETED') {
+        const amount = result.amount_received;
+        setPaymentResult({
+          status: 'SUCCESS', alert_type: 'PAYMENT_SUCCESS', invoice_id: activeInvoice.invoice_id,
+          amount_received: amount, amount_expected: result.amount_expected, deficit: 0,
+          message: 'Payment confirmed by Paytm Transaction Status API.',
+          voice_alert: `Paytm par ₹${amount} prapt hue`,
+        });
+        setGatewayCheckMessage('Paytm confirmed this order as paid.');
+        setPaymentTrace([
+          { label: 'Paytm status query', detail: 'Server-to-server status response verified', result: 'pass' },
+          { label: 'Amount guard', detail: `₹${amount.toFixed(2)} matched the locked ₹${result.amount_expected.toFixed(2)}`, result: 'pass' },
+          { label: 'Soundbox response', detail: 'Payment confirmed and chime played', result: 'pass' },
+        ]);
+        playPaytmChime();
+        speakAnnouncement(`Paytm par ₹${amount} prapt hue`, 'hi');
+      } else if (result.status === 'SHORT_PAYMENT') {
+        const deficit = result.deficit || 0;
+        setPaymentResult({
+          status: 'SHORTFALL_ALERT', alert_type: 'SHORT_PAYMENT', invoice_id: activeInvoice.invoice_id,
+          amount_received: result.amount_received, amount_expected: result.amount_expected, deficit,
+          message: `Paytm confirmed a payment shortfall of ₹${deficit}.`,
+          voice_alert: `Savdhaan! ₹${result.amount_received} prapt hue. ₹${deficit} baaki hai!`,
+        });
+        setGatewayCheckMessage('Paytm confirmed a payment below the locked amount.');
+        setPaymentTrace([
+          { label: 'Paytm status query', detail: 'Server-to-server status response verified', result: 'pass' },
+          { label: 'Amount guard', detail: `Expected ₹${result.amount_expected.toFixed(2)}, received ₹${result.amount_received.toFixed(2)}`, result: 'warn' },
+          { label: 'Soundbox response', detail: `Shortfall alarm raised: ₹${deficit.toFixed(2)} remains`, result: 'warn' },
+        ]);
+        playAlertSiren();
+        speakAnnouncement(`Savdhaan! ₹${result.amount_received} prapt hue. ₹${deficit} baaki hai!`, 'hi');
+      } else {
+        setGatewayCheckMessage(`Paytm status: ${result.status}. The bill remains open until Paytm confirms success.`);
+        setPaymentTrace([
+          { label: 'Paytm status query', detail: `Paytm returned ${result.status}`, result: 'info' },
+          { label: 'Settlement guard', detail: 'Bill stays open; success has not been confirmed', result: 'warn' },
+        ]);
+      }
+    } catch (err) {
+      setGatewayCheckMessage(err instanceof Error ? err.message : 'Could not check Paytm status.');
+    } finally {
+      setIsVerifyingPayment(false);
+    }
+  };
+
+  useEffect(() => {
+    if (activeInvoice?.payment_mode !== 'PAYTM_DYNAMIC_QR') return;
+    if (paymentResult?.status === 'SUCCESS' || paymentResult?.status === 'SHORTFALL_ALERT') return;
+    if (isVerifyingPayment) return;
+    const timer = window.setInterval(() => {
+      void handleCheckPaytmStatus();
+    }, 7000);
+    return () => window.clearInterval(timer);
+  }, [activeInvoice?.invoice_id, activeInvoice?.payment_mode, isVerifyingPayment, paymentResult?.status]);
+
+  const handleReplayUnverifiedClaim = () => {
+    const invId = activeInvoice?.invoice_id || 'INV-DEMO';
+    setPaymentResult({
+      status: 'ERROR', alert_type: 'UNMATCHED', invoice_id: invId,
+      amount_received: 0, amount_expected: upiDueAmount, deficit: upiDueAmount,
+      message: 'Customer claim received without a signed Paytm event.',
+      voice_alert: 'Savdhaan! Payment abhi confirm nahi hua.',
+    });
+    setGatewayCheckMessage('No signed gateway event arrived. The invoice remains unpaid.');
+    setPaymentTrace([
+      { label: 'Customer claim', detail: `Customer shows a screenshot claiming ₹${upiDueAmount.toFixed(2)}`, result: 'info' },
+      { label: 'Gateway callback', detail: 'No signed Paytm event received for this invoice', result: 'warn' },
+      { label: 'Settlement guard', detail: 'No payment recorded; invoice remains open', result: 'pass' },
+      { label: 'Soundbox response', detail: 'Unverified payment warning; no success chime', result: 'warn' },
+    ]);
+    playAlertSiren();
+    speakAnnouncement('Savdhaan! Payment abhi confirm nahi hua.', 'hi');
   };
 
   // Step 3: Open in WhatsApp directly (No merchant account needed)
@@ -403,7 +552,6 @@ export const CheckoutTerminal: React.FC = () => {
     setReminderSent(false);
     setIsCreditSettled(false);
     setSecondsRemaining(180);
-    setReceivedAmountInput('400.00');
   };
 
   const customerName = activeInvoice?.customer_name || parsedData?.customer_name || 'Rahul';
@@ -414,7 +562,8 @@ export const CheckoutTerminal: React.FC = () => {
   return (
     <div className="max-w-4xl w-full mx-auto px-4 sm:px-8 py-4">
       {/* Step Indicator Header (ALWAYS CLICKABLE - NEVER BLOCKS THE PRESENTER) */}
-      <div className="mb-8 max-w-3xl mx-auto">
+      <div className="mb-8 max-w-4xl mx-auto">
+        <p className="text-center text-xs font-semibold uppercase tracking-wider text-[#717171] mb-3">Vani merchant agent · jump to any flow</p>
         <div className="grid grid-cols-4 gap-3">
           <button
             type="button"
@@ -468,21 +617,21 @@ export const CheckoutTerminal: React.FC = () => {
             onClick={() => setCurrentStep(1)}
             className={`cursor-pointer ${currentStep === 1 ? 'text-[#3d3d3d] font-bold' : 'hover:text-[#3d3d3d]'}`}
           >
-            1. Voice Checkout
+            1. Voice Bill Agent
           </button>
           <button
             type="button"
             onClick={() => setCurrentStep(2)}
             className={`cursor-pointer ${currentStep === 2 ? 'text-[#3d3d3d] font-bold' : 'hover:text-[#3d3d3d]'}`}
           >
-            2. Soundbox & Spoof Guard
+            2. Payment Guard
           </button>
           <button
             type="button"
             onClick={() => setCurrentStep(3)}
             className={`cursor-pointer ${currentStep === 3 ? 'text-[#3d3d3d] font-bold' : 'hover:text-[#3d3d3d]'}`}
           >
-            3. Partial Udhari Link
+            3. Udhari Recovery
           </button>
           <button
             type="button"
@@ -530,8 +679,8 @@ export const CheckoutTerminal: React.FC = () => {
               {isListening
                 ? 'Recording your voice... Click to finish'
                 : isProcessingVoice
-                ? 'Transcribing with Groq Whisper & parsing intent...'
-                : 'Hold or click microphone to speak bill'}
+                ? 'Vani is listening and preparing the bill…'
+                : 'Tap to speak naturally in Hindi, English or Hinglish'}
             </span>
 
             {isListening && (
@@ -561,7 +710,7 @@ export const CheckoutTerminal: React.FC = () => {
                 type="text"
                 value={transcript}
                 onChange={(e) => setTranscript(e.target.value)}
-                placeholder="Speak or type: e.g. Customer bill ₹650 — ₹400 UPI now, ₹250 udhari for Monday"
+                placeholder="Try: 650 ka bill, 400 UPI abhi, 250 udhari Monday ko, Rahul"
                 className="w-full h-14 sm:h-16 pl-6 pr-14 bg-[#fcfcfc] border border-[#e6e6e6] rounded-full text-sm sm:text-base text-[#3d3d3d] placeholder-[#999999] focus:outline-none focus:border-[#3a3f5c] shadow-2xs font-normal"
               />
               <button
@@ -586,7 +735,7 @@ export const CheckoutTerminal: React.FC = () => {
                 }}
                 className="text-[#3a3f5c] font-medium hover:underline cursor-pointer"
               >
-                &quot;Customer bill ₹650 — ₹400 UPI now, ₹250 udhari for Monday&quot;
+                Use sample: ₹650 bill • ₹400 UPI • ₹250 udhari • Rahul
               </button>
             </div>
           </div>
@@ -704,7 +853,9 @@ export const CheckoutTerminal: React.FC = () => {
               Paytm Soundbox Counter Screen
             </h2>
             <p className="text-sm text-[#717171] mt-1">
-              Amount locked to customer bill • Webhook checks incoming UTR before buyer exits
+              {activeInvoice?.payment_mode === 'PAYTM_DYNAMIC_QR'
+                ? 'Paytm-issued amount-locked QR • Signed callback and Paytm status API verify settlement'
+                : 'Preview only • local QR does not collect money or verify a bank transaction'}
             </p>
           </div>
 
@@ -716,9 +867,9 @@ export const CheckoutTerminal: React.FC = () => {
                 <Volume2 className="w-3.5 h-3.5 text-[#3a3f5c]" />
                 <span className="font-medium text-[#3a3f5c]">Paytm Soundbox Pro</span>
               </div>
-              <span className="font-mono text-[11px] text-[#0e9f6e] font-semibold flex items-center gap-1">
+              <span className={`font-mono text-[11px] font-semibold flex items-center gap-1 ${activeInvoice?.payment_mode === 'PAYTM_DYNAMIC_QR' ? 'text-[#0e9f6e]' : 'text-amber-700'}`}>
                 <span className="w-1.5 h-1.5 rounded-full bg-[#0e9f6e] animate-ping" />
-                UTR Webhook Active
+                {activeInvoice?.payment_mode === 'PAYTM_DYNAMIC_QR' ? 'Paytm Gateway' : 'Demo Only'}
               </span>
             </div>
 
@@ -737,7 +888,7 @@ export const CheckoutTerminal: React.FC = () => {
               <QRCodeDisplay
                 value={
                   activeInvoice?.qr_data ||
-                  `upi://pay?pa=merchant@paytm&pn=StoreCounter&am=${upiDueAmount.toFixed(2)}&cu=INR`
+                  `upi://pay?pa=demo-not-a-real-vpa.invalid&pn=DEMO_ONLY&am=${upiDueAmount.toFixed(2)}&cu=INR`
                 }
                 size={230}
               />
@@ -756,84 +907,115 @@ export const CheckoutTerminal: React.FC = () => {
             </div>
           </div>
 
-          {/* Interactive Webhook Simulator (Simulates Buyer Phone Scenarios) */}
+          {/* Genuine gateway status lookup or explicitly demo-only event controls */}
           <div className="pt-4 border-t border-[#e6e6e6] max-w-2xl mx-auto space-y-4">
             <div className="text-center">
               <span className="text-xs font-semibold uppercase tracking-wider text-[#717171] flex items-center justify-center gap-1.5">
                 <Smartphone className="w-4 h-4 text-[#3a3f5c]" />
-                Incoming Buyer Payment Simulator (Webhook Trigger)
+                {activeInvoice?.payment_mode === 'PAYTM_DYNAMIC_QR' ? 'Paytm Payment Verification' : 'Webhook Event Rehearsal'}
               </span>
               <p className="text-xs text-[#717171] mt-0.5">
-                Test both hackathon scenarios: exact match settlement vs. shortfall spoof attack
+                {activeInvoice?.payment_mode === 'PAYTM_DYNAMIC_QR'
+                  ? 'Paytm’s signed callback and automatic status checks drive the decision. The bill stays open until the gateway confirms it.'
+                  : 'Replay fixed test events to inspect the guard decision. This local rehearsal does not contact Paytm or move money.'}
               </p>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            {activeInvoice?.payment_mode === 'PAYTM_DYNAMIC_QR' ? (
+              <div className="text-center space-y-3">
+                <p className="text-sm font-medium text-[#3d3d3d]">
+                  {isVerifyingPayment ? 'Checking Paytm settlement…' : 'Waiting for Paytm settlement; status checks run automatically.'}
+                </p>
+                <p className="text-xs text-[#717171]">The invoice remains open until Paytm confirms the exact amount.</p>
+                {gatewayCheckMessage && <p aria-live="polite" className="text-xs text-[#717171]">{gatewayCheckMessage}</p>}
+              </div>
+            ) : (
+              <>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
               {/* Scenario 1: Exact Match */}
               <button
                 type="button"
-                onClick={() => handleTriggerWebhook(upiDueAmount)}
+                onClick={() => handleTriggerWebhook('exact_match')}
                 disabled={isVerifyingPayment}
                 className="p-5 rounded-2xl border-2 border-[#0e9f6e]/30 bg-[#0e9f6e]/5 hover:bg-[#0e9f6e]/10 text-left transition-all cursor-pointer group disabled:opacity-50"
               >
                 <div className="flex items-center justify-between mb-2">
                   <span className="text-xs font-bold text-[#0e9f6e] uppercase tracking-wide">
-                    Flow 1: Match Payment
+                    Run exact-match test
                   </span>
                   <CheckCircle2 className="w-4 h-4 text-[#0e9f6e]" />
                 </div>
                 <div className="text-lg font-bold text-[#3d3d3d]">
-                  Buyer Pays Full ₹{upiDueAmount.toFixed(0)}
+                  Expected ₹{upiDueAmount.toFixed(2)} received
                 </div>
                 <p className="text-xs text-[#717171] mt-1">
-                  Incoming webhook matches ₹{upiDueAmount.toFixed(2)}. Soundbox confirms UTR and triggers chime.
+                  Backend creates a signed ₹{upiDueAmount.toFixed(2)} fixture and runs it through the amount guard.
                 </p>
               </button>
 
               {/* Scenario 2: Shortfall Spoof */}
               <button
                 type="button"
-                onClick={() => handleTriggerWebhook(40.0)}
+                onClick={() => handleTriggerWebhook('shortfall')}
                 disabled={isVerifyingPayment}
                 className="p-5 rounded-2xl border-2 border-rose-200 bg-rose-50/50 hover:bg-rose-50 text-left transition-all cursor-pointer group disabled:opacity-50"
               >
                 <div className="flex items-center justify-between mb-2">
                   <span className="text-xs font-bold text-rose-700 uppercase tracking-wide">
-                    Flow 2: Spoof Attack
+                    Run shortfall test
                   </span>
                   <ShieldAlert className="w-4 h-4 text-rose-600" />
                 </div>
                 <div className="text-lg font-bold text-rose-900">
-                  Buyer Pays Only ₹40
+                  ₹40 received against ₹{upiDueAmount.toFixed(2)}
                 </div>
                 <p className="text-xs text-[#717171] mt-1">
-                  Spoof attempt reports ₹40. Soundbox sounds alarm siren and announces deficit before buyer leaves.
+                  Backend creates a signed short-payment fixture. Soundbox alarms; the invoice stays unpaid.
                 </p>
+              </button>
+
+              <button
+                type="button"
+                onClick={handleReplayUnverifiedClaim}
+                disabled={isVerifyingPayment}
+                className="p-5 rounded-2xl border-2 border-amber-200 bg-amber-50/60 hover:bg-amber-50 text-left transition-all cursor-pointer group disabled:opacity-50"
+              >
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-xs font-bold text-amber-800 uppercase tracking-wide">Replay fake receipt claim</span>
+                  <ShieldAlert className="w-4 h-4 text-amber-700" />
+                </div>
+                <div className="text-lg font-bold text-amber-950">Screenshot says ₹{upiDueAmount.toFixed(0)}</div>
+                <p className="text-xs text-[#717171] mt-1">No signed gateway event arrives. Vani keeps the invoice open and warns the merchant.</p>
               </button>
             </div>
 
-            {/* Custom amount test */}
-            <div className="flex items-center gap-3 pt-2">
-              <span className="text-xs text-[#717171] whitespace-nowrap">Or Custom Webhook:</span>
-              <div className="relative flex-1">
-                <span className="absolute left-4 top-1/2 -translate-y-1/2 text-xs text-[#717171]">₹</span>
-                <input
-                  type="text"
-                  value={receivedAmountInput}
-                  onChange={(e) => setReceivedAmountInput(e.target.value)}
-                  placeholder="0.00"
-                  className="w-full h-10 pl-8 pr-3 bg-[#fcfcfc] border border-[#e6e6e6] rounded-full text-xs font-mono text-[#3d3d3d]"
-                />
+              </>
+            )}
+
+            {paymentTrace.length > 0 && (
+              <div className="rounded-2xl border border-[#e6e6e6] bg-[#fcfcfc] p-5 space-y-3">
+                <div className="flex items-center justify-between gap-3">
+                  <h3 className="text-sm font-semibold text-[#3d3d3d]">Verification trace</h3>
+                  <span className={`text-[10px] uppercase tracking-wider font-bold px-2.5 py-1 rounded-full ${activeInvoice?.payment_mode === 'PAYTM_DYNAMIC_QR' ? 'bg-emerald-50 text-emerald-800' : 'bg-amber-50 text-amber-800'}`}>
+                    {activeInvoice?.payment_mode === 'PAYTM_DYNAMIC_QR' ? 'Gateway evidence' : 'Local fixture'}
+                  </span>
+                </div>
+                <ol className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  {paymentTrace.map((item, index) => (
+                    <li key={`${item.label}-${index}`} className="flex gap-2.5 rounded-xl bg-white border border-[#eeeeee] p-3">
+                      <span className={`mt-0.5 w-5 h-5 shrink-0 rounded-full text-[10px] font-bold flex items-center justify-center ${item.result === 'pass' ? 'bg-emerald-100 text-emerald-800' : item.result === 'warn' ? 'bg-rose-100 text-rose-800' : 'bg-slate-100 text-slate-600'}`}>
+                        {item.result === 'pass' ? '✓' : item.result === 'warn' ? '!' : 'i'}
+                      </span>
+                      <span className="min-w-0">
+                        <span className="block text-xs font-semibold text-[#3d3d3d]">{item.label}</span>
+                        <span className="block text-[11px] leading-relaxed text-[#717171]">{item.detail}</span>
+                      </span>
+                    </li>
+                  ))}
+                </ol>
               </div>
-              <button
-                type="button"
-                onClick={() => handleTriggerWebhook(parseFloat(receivedAmountInput) || 0)}
-                disabled={isVerifyingPayment}
-                className="h-10 px-5 rounded-full bg-[#3a3f5c] text-white text-xs font-medium cursor-pointer hover:bg-[#2c314a]"
-              >
-                Send Webhook
-              </button>
-            </div>
+            )}
 
             {/* Success Banner */}
             {paymentResult?.status === 'SUCCESS' && (
@@ -842,10 +1024,12 @@ export const CheckoutTerminal: React.FC = () => {
                   <CheckCircle2 className="w-5 h-5 flex-shrink-0" />
                   <div>
                     <span className="font-bold block">
-                      Paytm UTR Confirmed for {customerName}!
+                      {activeInvoice?.payment_mode === 'PAYTM_DYNAMIC_QR' ? `Paytm confirmed payment for ${customerName}` : 'Exact-match fixture accepted'}
                     </span>
                     <span className="text-xs text-[#0e9f6e]/90">
-                      Payment of ₹{paymentResult.amount_received.toFixed(2)} received on Soundbox.
+                      {activeInvoice?.payment_mode === 'PAYTM_DYNAMIC_QR'
+                        ? `Paytm confirmed ₹${paymentResult.amount_received.toFixed(2)} for this order.`
+                        : `Local rehearsal: ₹${paymentResult.amount_received.toFixed(2)} matched; no payment was made.`}
                     </span>
                   </div>
                 </div>
@@ -866,7 +1050,7 @@ export const CheckoutTerminal: React.FC = () => {
                   <AlertTriangle className="w-5 h-5 text-rose-600 flex-shrink-0" />
                   <div>
                     <span className="font-bold block text-rose-900">
-                      Soundbox Alarm Triggered for {customerName}!
+                      {activeInvoice?.payment_mode === 'PAYTM_DYNAMIC_QR' ? `Paytm amount mismatch for ${customerName}` : 'Shortfall fixture detected'}
                     </span>
                     <span className="text-xs text-rose-700">
                       Expected ₹{paymentResult.amount_expected.toFixed(2)} • Received only ₹{paymentResult.amount_received.toFixed(2)} (Deficit: ₹{paymentResult.deficit.toFixed(2)})
@@ -880,6 +1064,16 @@ export const CheckoutTerminal: React.FC = () => {
                 >
                   Dismiss
                 </button>
+              </div>
+            )}
+
+            {paymentResult?.status === 'ERROR' && (
+              <div className="p-4 bg-amber-50 border-2 border-amber-300 rounded-2xl text-sm text-amber-950 flex items-center gap-3">
+                <ShieldAlert className="w-5 h-5 shrink-0 text-amber-700" />
+                <div>
+                  <span className="font-bold block">Payment not verified · invoice remains open</span>
+                  <span className="text-xs">The screenshot is not payment evidence. Vani needs a signed Paytm callback or status confirmation.</span>
+                </div>
               </div>
             )}
 

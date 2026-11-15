@@ -31,6 +31,7 @@ export interface InvoiceData {
   expires_in: number;
   status: 'PENDING_PAYMENT' | 'COMPLETED' | 'SHORT_PAYMENT' | 'EXPIRED';
   udhari_id?: string;
+  payment_mode?: 'DEMO' | 'PAYTM_DYNAMIC_QR';
 }
 
 export interface WebhookResponse {
@@ -96,6 +97,8 @@ export interface InvoiceAnalysisResponse {
   items: InvoiceItemParsed[];
   price_hikes: InvoiceItemParsed[];
   draft_po: DraftPO;
+  analysis_source?: 'LOCAL_FIXTURE' | 'GEMINI_VISION';
+  validation_note?: string;
 }
 
 export interface RestockOrderResponse {

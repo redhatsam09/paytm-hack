@@ -1,4 +1,4 @@
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Literal
 from pydantic import BaseModel, Field
 
 # --- Voice & Intent Schemas ---
@@ -27,9 +27,9 @@ class VoiceParseResponse(BaseModel):
 # --- Counter & QR Schemas ---
 
 class CreateInvoiceRequest(BaseModel):
-    total_bill: float
-    upi_due: float
-    udhari_amount: float = 0.0
+    total_bill: float = Field(gt=0)
+    upi_due: float = Field(gt=0)
+    udhari_amount: float = Field(default=0.0, ge=0)
     cash_received: float = 0.0
     customer_name: Optional[str] = None
     customer_phone: Optional[str] = None
@@ -52,15 +52,20 @@ class InvoiceResponse(BaseModel):
     expires_in: int = 180
     status: str
     udhari_id: Optional[str] = None
+    payment_mode: str = "DEMO"
 
 # --- Webhook & Spoof Guard Schemas ---
 
 class WebhookPayload(BaseModel):
     merchant_vpa: str = "srilakshmi@paytm"
     utr: str
-    amount: float
+    amount: float = Field(gt=0)
     status: str = "SUCCESS"
     invoice_id: Optional[str] = None
+
+class DemoFixtureRequest(BaseModel):
+    invoice_id: str
+    scenario: Literal["exact_match", "shortfall"]
 
 class WebhookResponse(BaseModel):
     status: str  # SUCCESS, SHORTFALL_ALERT, ERROR
@@ -108,7 +113,7 @@ class UdhariReminderResponse(BaseModel):
 class UdhariReconcileRequest(BaseModel):
     udhari_id: str
     utr: str
-    amount_paid: float
+    amount_paid: float = Field(gt=0)
 
 class UdhariReconcileResponse(BaseModel):
     success: bool
@@ -141,6 +146,8 @@ class InvoiceAnalysisResponse(BaseModel):
     items: List[InvoiceItemParsed]
     price_hikes: List[InvoiceItemParsed]
     draft_po: DraftPO
+    analysis_source: Literal["LOCAL_FIXTURE", "GEMINI_VISION"] = "LOCAL_FIXTURE"
+    validation_note: str = "Local fixture data; no external OCR or supplier API was used."
 
 class SendPORequest(BaseModel):
     po_number: str

@@ -6,6 +6,7 @@ from sqlalchemy import select
 from app.config import settings
 from app.database import get_db
 from app.models import Merchant
+from app.config import paytm_live_ready
 
 router = APIRouter(prefix="/settings", tags=["API & System Settings"])
 
@@ -46,6 +47,12 @@ async def get_settings_status(db: AsyncSession = Depends(get_db)):
 
     return {
         "status": "success",
+        "payment_integration": {
+            "mode": "PAYTM_DYNAMIC_QR" if paytm_live_ready() else "DEMO_ONLY",
+            "environment": settings.PAYTM_ENV,
+            "merchant_configured": paytm_live_ready(),
+            "webhook_url": settings.PAYTM_PUBLIC_WEBHOOK_URL or None,
+        },
         "engine_mode": "LIVE_API" if has_live_keys else "ZERO_SETUP_MOCK",
         "mode_description": (
             "Active with Live AI/API integrations"

@@ -142,6 +142,13 @@ async def reconcile_udhari_payment(request: UdhariReconcileRequest, db: AsyncSes
 
     if not udhari:
         raise HTTPException(status_code=404, detail="Udhari record not found")
+    if udhari.status == "SETTLED":
+        raise HTTPException(status_code=409, detail="Udhari record is already settled")
+    if abs(float(request.amount_paid) - float(udhari.amount_due)) > 0.005:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Settlement amount must match the outstanding balance of ₹{udhari.amount_due:.2f}",
+        )
 
     now = datetime.now(timezone.utc)
     udhari.status = "SETTLED"

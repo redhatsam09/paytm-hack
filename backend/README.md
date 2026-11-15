@@ -16,6 +16,8 @@ cd /workspaces/paytm-hack/backend
 pip install -r requirements.txt
 ```
 
+For local AI credentials, put environment variables such as `SARVAM_API_KEY=...` in `backend/.env`. `start.sh` loads this ignored local file into the backend process; do not add credentials to frontend code or commit the file. Audio transcription uses Sarvam Saaras v4 with automatic language detection, then parses the transcript into the checkout split.
+
 ### Running the Server
 ```bash
 ./start.sh
@@ -24,6 +26,22 @@ pip install -r requirements.txt
 # Interactive ReDoc: http://localhost:8000/redoc
 # Health Check: http://localhost:8000/health
 ```
+
+### Paytm Dynamic QR staging setup
+
+The local preview QR is not a Paytm transaction. For a verifiable payment prototype, set the following on the **backend only** using Paytm issued staging credentials:
+
+```bash
+export PAYTM_ENV=staging
+export PAYTM_MID=your_staging_mid
+export PAYTM_MERCHANT_KEY=your_staging_merchant_key
+export PAYTM_POS_ID=your_assigned_pos_id
+# Optional, only when Paytm has issued a client ID for multiple keys:
+export PAYTM_CLIENT_ID=your_client_id
+export PAYTM_PUBLIC_WEBHOOK_URL=https://your-public-host/api/paytm/webhook
+```
+
+Paytm's Dynamic QR product is limited to approved enterprise merchants. Without those credentials, the app stays in `DEMO_ONLY` mode and labels all QR/payment controls as simulation. Do not use production credentials for this prototype. Configure the HTTPS webhook URL in the Paytm staging merchant dashboard; Paytm only accepts webhook URLs on port 443.
 
 ### Running Tests
 ```bash
@@ -85,13 +103,17 @@ pytest -v
 
 ### 2.3 Paytm Webhook Listener & Spoof Guard
 - **`POST /api/paytm/webhook`**
-  Simulates Paytm real-time payment gateway notification. Reconciles incoming payment against expected amount:
-  - **Full Payment (`amount >= expected`):**
+  Real Paytm callback endpoint. It validates Paytm's `CHECKSUMHASH`, matches the MID and order to a Paytm-issued QR, then calls Paytm's Transaction Status API before reconciliation. It never accepts a browser-supplied amount as proof of payment.
+- **`GET /api/counter/status/{invoice_id}`**
+  Queries Paytm Transaction Status API and only settles a Paytm-issued QR order after a verified exact amount.
+- **`POST /api/paytm/demo-fixture`**
+  Runs a fixed server-generated HMAC fixture (`exact_match` or `shortfall`) through the reconciliation path. This exercises the app's matching and alert behavior, but is not a Paytm signature and does not move money. Disabled once Paytm credentials are configured.
+  - **Exact amount match:**
     - Status: `SUCCESS`
     - Audio Announcement: `"Paytm par ₹400 prapt hue"`
     - Dual-Screen: Broadcasts green tick success animation
     - WhatsApp: Prepares customer credit collection link
-  - **Shortfall Mismatch (`amount < expected`):**
+  - **Shortfall or amount mismatch:**
     - Status: `SHORTFALL_ALERT`
     - Audio Warning: `"Savdhaan! Keval ₹40 prapt hue hain! ₹360 baaki hai!"`
     - Dual-Screen: Broadcasts red emergency siren warning with deficit amount

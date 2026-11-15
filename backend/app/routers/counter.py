@@ -1,5 +1,6 @@
 import uuid
 import random
+from datetime import datetime, timezone
 from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,6 +12,13 @@ from app.services.qr_service import generate_paytm_upi_string, generate_qr_base6
 from app.services.sse_manager import sse_manager
 from app.services.whatsapp_service import create_paytm_payment_link
 from app.config import settings
+from app.config import paytm_live_ready
+
+try:
+    from app.services.paytm_gateway import create_dynamic_qr, fetch_transaction_status
+except ImportError:  # Keeps the app importable before backend requirements are installed.
+    create_dynamic_qr = None
+    fetch_transaction_status = None
 
 router = APIRouter(prefix="/counter", tags=["Counter & Dynamic QR"])
 
@@ -27,12 +35,27 @@ async def create_invoice(request: CreateInvoiceRequest, db: AsyncSession = Depen
 
     # Generate collision-free unique invoice ID
     invoice_id = f"INV-{uuid.uuid4().hex[:6].upper()}"
-    upi_string = generate_paytm_upi_string(
-        amount=request.upi_due,
-        invoice_id=invoice_id,
-        merchant_vpa=settings.DEFAULT_MERCHANT_VPA,
-        merchant_name=settings.DEFAULT_MERCHANT_NAME
-    )
+    payment_mode = "DEMO"
+    if paytm_live_ready():
+        if create_dynamic_qr is None:
+            raise HTTPException(status_code=503, detail="Install backend payment dependencies to use Paytm Dynamic QR")
+        try:
+            gateway_qr = await create_dynamic_qr(
+                order_id=invoice_id,
+                amount=request.upi_due,
+                phone=request.customer_phone,
+            )
+            upi_string = gateway_qr["qr_data"]
+            payment_mode = "PAYTM_DYNAMIC_QR"
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"Paytm QR creation failed: {exc}") from exc
+    else:
+        upi_string = generate_paytm_upi_string(
+            amount=request.upi_due,
+            invoice_id=invoice_id,
+            merchant_vpa="demo-not-a-real-vpa.invalid",
+            merchant_name="DEMO ONLY - NO PAYMENT"
+        )
     qr_base64 = generate_qr_base64(upi_string)
 
     # Save transaction record in DB
@@ -50,7 +73,8 @@ async def create_invoice(request: CreateInvoiceRequest, db: AsyncSession = Depen
         items_summary=request.items_summary,
         status="PENDING_PAYMENT",
         qr_data=upi_string,
-        qr_code_url=qr_base64
+        qr_code_url=qr_base64,
+        payment_mode=payment_mode,
     )
     db.add(txn)
 
@@ -92,7 +116,8 @@ async def create_invoice(request: CreateInvoiceRequest, db: AsyncSession = Depen
         "amount": request.upi_due,
         "expires_in": settings.QR_EXPIRY_SECONDS,
         "status": "PENDING_PAYMENT",
-        "udhari_id": udhari_id
+        "udhari_id": udhari_id,
+        "payment_mode": payment_mode,
     }
 
     # Store active state
@@ -110,6 +135,37 @@ async def get_active_invoice():
     if not active_counter_state:
         return {"active": False, "data": None}
     return {"active": True, "data": active_counter_state}
+
+@router.get("/status/{invoice_id}")
+async def check_paytm_status(invoice_id: str, db: AsyncSession = Depends(get_db)):
+    """Ask Paytm's server for the final status of a real Dynamic QR order."""
+    if not paytm_live_ready() or fetch_transaction_status is None:
+        raise HTTPException(status_code=409, detail="Paytm live verification is not configured; this invoice is demo-only")
+    txn = await db.scalar(select(Transaction).where(Transaction.invoice_id == invoice_id))
+    if not txn:
+        raise HTTPException(status_code=404, detail="Invoice not found")
+    if txn.payment_mode != "PAYTM_DYNAMIC_QR":
+        raise HTTPException(status_code=409, detail="This invoice used the demo QR, not Paytm Dynamic QR")
+    try:
+        gateway = await fetch_transaction_status(invoice_id)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Paytm status check failed: {exc}") from exc
+
+    status = gateway.get("resultInfo", {}).get("resultStatus") or gateway.get("resultStatus")
+    amount = gateway.get("txnAmount") or gateway.get("TXNAMOUNT")
+    gateway_mid = gateway.get("mid") or gateway.get("MID")
+    gateway_order = gateway.get("orderId") or gateway.get("ORDERID")
+    if gateway_order != invoice_id or gateway_mid != settings.PAYTM_MID:
+        raise HTTPException(status_code=502, detail="Paytm status response did not match this merchant order")
+    if status == "TXN_SUCCESS" and amount is not None:
+        paid = float(amount)
+        txn.upi_received = paid
+        txn.utr = gateway.get("bankTxnId") or gateway.get("BANKTXNID") or gateway.get("txnId") or gateway.get("TXNID")
+        txn.status = "COMPLETED" if abs(paid - txn.upi_due) < 0.005 else "SHORT_PAYMENT"
+        txn.completed_at = datetime.now(timezone.utc) if txn.status == "COMPLETED" else None
+        await db.commit()
+        return {"status": txn.status, "amount_received": paid, "amount_expected": txn.upi_due, "deficit": max(0, round(txn.upi_due - paid, 2)), "utr": txn.utr, "verification_source": "PAYTM_TRANSACTION_STATUS"}
+    return {"status": status or "PENDING", "amount_received": float(amount or 0), "amount_expected": txn.upi_due, "verification_source": "PAYTM_TRANSACTION_STATUS"}
 
 @router.post("/reset")
 async def reset_counter():
@@ -135,6 +191,7 @@ async def get_counter_history(limit: int = 10, db: AsyncSession = Depends(get_db
                 "upi_received": r.upi_received,
                 "udhari_amount": r.udhari_amount,
                 "status": r.status,
+                "payment_mode": r.payment_mode,
                 "utr": r.utr,
                 "customer_name": r.customer_name,
                 "created_at": r.created_at.isoformat() if r.created_at else None,

@@ -40,6 +40,8 @@ async def analyze_invoice_image(
     invoice_no = f"INV-WH-{datetime.datetime.now().strftime('%m%d%H')}"
     invoice_date = datetime.date.today().isoformat()
     raw_items = SAMPLE_INVOICE_ITEMS
+    analysis_source = "LOCAL_FIXTURE"
+    validation_note = "Local fixture data; no external OCR or supplier API was used."
 
     # Try Gemini Vision if API key is configured
     if settings.GEMINI_API_KEY and image_bytes:
@@ -102,6 +104,8 @@ async def analyze_invoice_image(
                 invoice_date = parsed_json["invoice_date"]
             if "items" in parsed_json and isinstance(parsed_json["items"], list) and len(parsed_json["items"]) > 0:
                 raw_items = parsed_json["items"]
+                analysis_source = "GEMINI_VISION"
+                validation_note = "OCR output was normalized and checked against stored SKU price history."
         except Exception as e:
             print(f"Notice: Gemini API call failed or timed out ({e}), using robust Kirana OCR engine.")
 
@@ -171,5 +175,7 @@ async def analyze_invoice_image(
         invoice_date=invoice_date,
         items=parsed_items,
         price_hikes=price_hikes,
-        draft_po=draft_po
+        draft_po=draft_po,
+        analysis_source=analysis_source,
+        validation_note=validation_note,
     )

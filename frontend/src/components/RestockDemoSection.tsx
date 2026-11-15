@@ -127,10 +127,22 @@ export const RestockDemoSection: React.FC<RestockDemoSectionProps> = ({
             {ocrAnalysis && (
               <div className="self-start max-w-[95%] sm:max-w-[85%] bg-white text-[#0A1B3D] p-5 rounded-[6px] shadow-2xs text-xs sm:text-sm border border-[#E6EAF5] animate-in fade-in">
                 <div className="flex items-center justify-between text-xs font-bold text-[#0A1B3D] mb-2 pb-2 border-b border-gray-100">
-                  <span>Gemini Vision OCR: Extracted 3 SKUs</span>
+                  <span>
+                    {ocrAnalysis.analysis_source === 'GEMINI_VISION' ? 'Gemini Vision OCR' : 'Local OCR Fixture'}
+                    : Extracted {ocrAnalysis.items.length} SKUs
+                  </span>
                   <span className="text-[#0E9F6E] bg-emerald-50 px-2 py-0.5 rounded-[2px]">
                     Bill #{ocrAnalysis.invoice_no}
                   </span>
+                </div>
+                <div className={`mb-3 rounded-[4px] border px-3 py-2 text-[11px] ${
+                  ocrAnalysis.analysis_source === 'GEMINI_VISION'
+                    ? 'border-emerald-200 bg-emerald-50 text-emerald-900'
+                    : 'border-sky-200 bg-sky-50 text-sky-900'
+                }`}>
+                  <strong>{ocrAnalysis.analysis_source === 'GEMINI_VISION' ? 'LIVE OCR' : 'LOCAL VERIFIED FIXTURE'}</strong>
+                  {' — '}
+                  {ocrAnalysis.validation_note || 'Results are deterministic demo data and do not claim a supplier API call.'}
                 </div>
 
                 {/* Extracted Line Items Table */}

@@ -70,14 +70,18 @@ export function subscribeToEvents(onEvent: (event: { event_type: string; data?: 
   let eventSource: EventSource | null = null;
   try {
     eventSource = new EventSource(`${API_BASE}/api/events`);
-    eventSource.onmessage = (e) => {
+    const deliver = (e: MessageEvent<string>) => {
       try {
         const parsed = JSON.parse(e.data);
-        onEvent(parsed);
+        onEvent({ event_type: e.type === 'message' ? parsed.event_type || parsed.event : e.type, data: parsed.data || parsed });
       } catch (err) {
         console.warn('Failed to parse SSE event data', err);
       }
     };
+    eventSource.onmessage = deliver;
+    ['PAYMENT_SUCCESS', 'SHORTFALL_ALERT', 'INVOICE_CREATED', 'COUNTER_RESET'].forEach((eventName) => {
+      eventSource?.addEventListener(eventName, deliver as EventListener);
+    });
     eventSource.onerror = () => {
       // Cleanly handled by browser reconnection
     };
@@ -199,23 +203,26 @@ export async function createCounterInvoice(payload: {
   customer_phone?: string;
   due_date?: string;
 }): Promise<InvoiceData> {
+  let response: Response | null = null;
   try {
-    const res = await fetch(`${API_BASE}/api/counter/create-invoice`, {
+    response = await fetch(`${API_BASE}/api/counter/create-invoice`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
       signal: AbortSignal.timeout(3000),
     });
-    if (res.ok) {
-      const data = await res.json();
-      return data;
-    }
   } catch {
-    // Backend unreachable, fallback
+    // Offline local preview below; never use it after a live backend rejects an order.
+  }
+  if (response) {
+    if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail || 'Could not create payment QR');
+    const invoice = await response.json();
+    mockState.activeInvoice = invoice;
+    return invoice;
   }
 
   const invoice_id = `INV-${Math.floor(1000 + Math.random() * 9000)}`;
-  const upi_string = `upi://pay?pa=merchant@paytm&pn=StoreCounter&am=${payload.upi_due.toFixed(2)}&cu=INR&tr=${invoice_id}&tn=CounterPayment`;
+  const upi_string = `upi://pay?pa=demo-not-a-real-vpa.invalid&pn=DEMO_ONLY&am=${payload.upi_due.toFixed(2)}&cu=INR&tr=${invoice_id}&tn=NoPayment`;
   const qr_code_url = `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(upi_string)}`;
 
   let udhari_id: string | undefined = undefined;
@@ -250,6 +257,7 @@ export async function createCounterInvoice(payload: {
     amount: payload.upi_due,
     expires_in: 180,
     status: 'PENDING_PAYMENT',
+    payment_mode: 'DEMO',
     udhari_id,
   };
 
@@ -257,60 +265,45 @@ export async function createCounterInvoice(payload: {
   return invoice;
 }
 
-// 3. Webhook Payment Verification / Spoof Guard
+// 3. Deterministic local gateway fixture (never represented as real money).
+export async function replayDemoPaymentFixture(payload: {
+  invoice_id: string;
+  scenario: 'exact_match' | 'shortfall';
+}): Promise<WebhookResponse> {
+  const response = await fetch(`${API_BASE}/api/paytm/demo-fixture`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail || 'Demo fixture rejected');
+  return await response.json();
+}
+
+// Compatibility for the two older, currently unmounted workflow components.
+// Their amount only selects a fixed test scenario; it is never sent as evidence.
 export async function triggerPaytmWebhook(payload: {
   utr: string;
   amount: number;
   invoice_id?: string;
   merchant_vpa?: string;
 }): Promise<WebhookResponse> {
-  try {
-    const res = await fetch(`${API_BASE}/api/paytm/webhook`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(3000),
-    });
-    if (res.ok) {
-      return await res.json();
-    }
-  } catch {
-    // Backend unreachable, fallback
-  }
+  const invoice = mockState.activeInvoice;
+  const invoiceId = payload.invoice_id || invoice?.invoice_id;
+  if (!invoiceId) throw new Error('Create an invoice before running a payment fixture');
+  const expected = invoice?.upi_due ?? 400;
+  return replayDemoPaymentFixture({
+    invoice_id: invoiceId,
+    scenario: Math.abs(payload.amount - expected) < 0.005 ? 'exact_match' : 'shortfall',
+  });
+}
 
-  const expected = mockState.activeInvoice?.upi_due || 400;
-  const received = payload.amount;
-
-  if (received >= expected) {
-    if (mockState.activeInvoice) {
-      mockState.activeInvoice.status = 'COMPLETED';
-    }
-    return {
-      status: 'SUCCESS',
-      alert_type: 'PAYMENT_SUCCESS',
-      invoice_id: payload.invoice_id || mockState.activeInvoice?.invoice_id,
-      amount_received: received,
-      amount_expected: expected,
-      deficit: 0,
-      message: `Payment Verified: ₹${received} received successfully.`,
-      voice_alert: `Paytm par ₹${received} prapt hue`,
-    };
-  } else {
-    const deficit = expected - received;
-    if (mockState.activeInvoice) {
-      mockState.activeInvoice.status = 'SHORT_PAYMENT';
-    }
-    return {
-      status: 'SHORTFALL_ALERT',
-      alert_type: 'SHORT_PAYMENT',
-      invoice_id: payload.invoice_id || mockState.activeInvoice?.invoice_id,
-      amount_received: received,
-      amount_expected: expected,
-      deficit,
-      message: `SHORT PAYMENT ALERT: Received ₹${received}, Expected ₹${expected}. Deficit: ₹${deficit}`,
-      voice_alert: `Savdhaan! Keval ₹${received} prapt hue hain! ₹${deficit} baaki hai!`,
-    };
-  }
+export async function checkPaytmPaymentStatus(invoiceId: string): Promise<{status: string; amount_received: number; amount_expected: number; deficit?: number; utr?: string; verification_source: string}> {
+  const res = await fetch(`${API_BASE}/api/counter/status/${encodeURIComponent(invoiceId)}`, {
+    signal: AbortSignal.timeout(15000),
+  });
+  if (!res.ok) throw new Error((await res.json().catch(() => null))?.detail || 'Paytm status check failed');
+  return await res.json();
 }
 
 // 4. Udhari Ledger APIs
@@ -367,6 +360,15 @@ export async function reconcileUdhariPayment(udhariId: string, amount: number): 
   }
 
   const item = mockState.udhariList.find(i => i.id === udhariId);
+  if (!item) {
+    return { success: false, message: 'Udhari record not found' };
+  }
+  if (item.status === 'SETTLED') {
+    return { success: false, message: 'Udhari record is already settled' };
+  }
+  if (Math.abs(item.amount_due - amount) > 0.005) {
+    return { success: false, message: `Settlement must match ₹${item.amount_due.toFixed(2)}` };
+  }
   if (item) {
     item.status = 'SETTLED';
     item.settled_at = new Date().toISOString();
@@ -468,6 +470,8 @@ export async function analyzeDistributorInvoice(file?: File | null): Promise<Inv
         { sku: 'Tata Salt 1kg', quantity: 30, expected_rate: 25.0 },
       ],
     },
+    analysis_source: 'LOCAL_FIXTURE',
+    validation_note: 'Local fixture data; no external OCR or supplier API was used.',
   };
 }
 

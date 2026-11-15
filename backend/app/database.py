@@ -1,6 +1,6 @@
 import uuid
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, text, inspect
 from app.config import settings
 from app.models import Base, Merchant, SkuPriceHistory, UdhariLedger
 
@@ -17,6 +17,10 @@ async def get_db():
 async def init_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # Upgrade existing local SQLite databases without requiring a reset.
+        columns = await conn.run_sync(lambda sync_conn: inspect(sync_conn).get_columns("transactions"))
+        if not any(column["name"] == "payment_mode" for column in columns):
+            await conn.execute(text("ALTER TABLE transactions ADD COLUMN payment_mode VARCHAR(30) NOT NULL DEFAULT 'DEMO'"))
 
     # Seed initial data if merchants table is empty
     async with async_session() as session:

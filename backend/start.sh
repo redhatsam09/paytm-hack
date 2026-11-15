@@ -5,6 +5,13 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+# Load local API credentials without placing them in source control.
+if [[ -f "$SCRIPT_DIR/.env" ]]; then
+  set -a
+  source "$SCRIPT_DIR/.env"
+  set +a
+fi
+
 export PYTHONPATH="$SCRIPT_DIR:$PYTHONPATH"
 PORT=${PORT:-8000}
 HOST=${HOST:-0.0.0.0}
