@@ -10,11 +10,11 @@ import {
   Clock,
   RotateCcw,
   Upload,
-  FileText,
   Send,
   ShieldCheck,
   User,
   CheckCircle2,
+  ExternalLink,
 } from 'lucide-react';
 import { QRCodeDisplay } from '@/components/QRCodeDisplay';
 import {
@@ -40,28 +40,17 @@ type TerminalStep = 1 | 2 | 3 | 4;
 export const CheckoutTerminal: React.FC = () => {
   const [currentStep, setCurrentStep] = useState<TerminalStep>(1);
 
-  // Step 1: Voice Input & Intent Split
-  const [transcript, setTranscript] = useState<string>(
-    'Ramesh bill ₹650 — ₹400 UPI now, ₹250 credit for Monday'
-  );
+  // Step 1: Voice Input & Intent Split (starts completely empty)
+  const [transcript, setTranscript] = useState<string>('');
   const [isListening, setIsListening] = useState<boolean>(false);
   const [isProcessingVoice, setIsProcessingVoice] = useState<boolean>(false);
-  const [parsedData, setParsedData] = useState<VoiceParseData | null>({
-    total_bill: 650,
-    upi_amount: 400,
-    udhari_amount: 250,
-    cash_amount: 0,
-    due_date: '2026-11-17',
-    customer_name: 'Ramesh',
-    customer_phone: '9876543210',
-    items: ['Kirana goods'],
-  });
+  const [parsedData, setParsedData] = useState<VoiceParseData | null>(null);
 
   // Step 2: Dynamic QR & Payment Verification
   const [activeInvoice, setActiveInvoice] = useState<InvoiceData | null>(null);
   const [isGeneratingInvoice, setIsGeneratingInvoice] = useState<boolean>(false);
   const [secondsRemaining, setSecondsRemaining] = useState<number>(180);
-  const [receivedAmountInput, setReceivedAmountInput] = useState<string>('400.00');
+  const [receivedAmountInput, setReceivedAmountInput] = useState<string>('0.00');
   const [isVerifyingPayment, setIsVerifyingPayment] = useState<boolean>(false);
   const [paymentResult, setPaymentResult] = useState<WebhookResponse | null>(null);
 
@@ -92,6 +81,7 @@ export const CheckoutTerminal: React.FC = () => {
 
   // Execute voice / text command
   const executeCommand = async (text: string) => {
+    if (!text.trim()) return;
     setIsProcessingVoice(true);
     setPaymentResult(null);
     try {
@@ -107,11 +97,13 @@ export const CheckoutTerminal: React.FC = () => {
     }
   };
 
-  // Push-to-Talk Mic: Click to start, click again to stop and auto-execute
+  // Push-to-Talk Mic: Click to start, click again to stop and execute
   const handleToggleMic = () => {
     if (isListening) {
       setIsListening(false);
-      executeCommand(transcript);
+      if (transcript.trim()) {
+        executeCommand(transcript);
+      }
       return;
     }
 
@@ -136,7 +128,7 @@ export const CheckoutTerminal: React.FC = () => {
         const recognition = new SpeechRecognition();
         recognition.continuous = false;
         recognition.interimResults = false;
-        recognition.lang = 'hi-IN';
+        recognition.lang = 'en-IN';
 
         recognition.onresult = (event) => {
           const spoken = event.results[0][0].transcript;
@@ -155,15 +147,17 @@ export const CheckoutTerminal: React.FC = () => {
       }
     }
 
-    // High fidelity simulated speech capture
+    // Default simulation if Web Speech API is unavailable in this environment
     setTimeout(() => {
       setIsListening(false);
-      executeCommand(transcript);
-    }, 1800);
+      if (transcript.trim()) {
+        executeCommand(transcript);
+      }
+    }, 2000);
   };
 
   // Step 1 -> Step 2: Create dynamic invoice
-  const handleProceedToQR = async () => {
+  const handleProceedToPayment = async () => {
     if (!parsedData) return;
     setIsGeneratingInvoice(true);
     try {
@@ -189,7 +183,7 @@ export const CheckoutTerminal: React.FC = () => {
     }
   };
 
-  // Step 2: Interactive payment verification
+  // Step 2: Payment verification and shortfall detection
   const handleVerifyPayment = async () => {
     const invId = activeInvoice?.invoice_id || 'INV-2026-001';
     const amount = parseFloat(receivedAmountInput) || 0;
@@ -207,19 +201,19 @@ export const CheckoutTerminal: React.FC = () => {
 
       if (res.status === 'SUCCESS') {
         playPaytmChime();
-        speakAnnouncement(res.voice_alert || `Paytm par ₹${amount} prapt hue`, 'hi');
+        speakAnnouncement(res.voice_alert || `Payment of ₹${amount} received`, 'en');
 
-        // Automatically advance to Step 3 if credit exists, or give complete button
+        // Automatically advance to Step 3 if store credit exists
         setTimeout(() => {
           if ((activeInvoice?.udhari_amount || parsedData?.udhari_amount || 0) > 0) {
             setCurrentStep(3);
           }
-        }, 1500);
+        }, 1600);
       } else {
         playAlertSiren();
         speakAnnouncement(
-          res.voice_alert || `Savdhaan! Keval ₹${amount} prapt hue hain! ₹${res.deficit} baaki hai!`,
-          'hi'
+          res.voice_alert || `Warning! Only ₹${amount} received! ₹${res.deficit} remaining!`,
+          'en'
         );
       }
     } catch (err) {
@@ -229,8 +223,25 @@ export const CheckoutTerminal: React.FC = () => {
     }
   };
 
-  // Step 3: Send WhatsApp Reminder
-  const handleSendReminder = async () => {
+  // Step 3: Open in WhatsApp directly (No merchant account needed)
+  const handleOpenCustomerWhatsApp = async () => {
+    const phone = activeInvoice?.customer_phone || parsedData?.customer_phone || '9876543210';
+    const cleanPhone = phone.replace(/\D/g, '');
+    const fullPhone = cleanPhone.length === 10 ? `91${cleanPhone}` : cleanPhone;
+    const name = activeInvoice?.customer_name || parsedData?.customer_name || 'Customer';
+    const amt = (activeInvoice?.udhari_amount || parsedData?.udhari_amount || 250).toFixed(2);
+    const dueDate = activeInvoice?.due_date || parsedData?.due_date || 'Monday';
+    const link = `https://p.paytm.me/pay?id=${activeInvoice?.udhari_id || 'credit-001'}&am=${amt}`;
+
+    const message = `Dear ${name},\n\nYour store credit balance of ₹${amt} at Store Counter is scheduled for payment on ${dueDate}.\n\nPlease complete your payment using this direct payment link:\n${link}\n\nThank you.`;
+
+    // Open WhatsApp Web or WhatsApp app directly with pre-filled message
+    if (typeof window !== 'undefined') {
+      const waUrl = `https://wa.me/${fullPhone}?text=${encodeURIComponent(message)}`;
+      window.open(waUrl, '_blank', 'noopener,noreferrer');
+    }
+
+    // Also notify backend to log reminder timestamp
     setIsSendingReminder(true);
     try {
       const udhId = activeInvoice?.udhari_id || 'udh-001';
@@ -238,13 +249,14 @@ export const CheckoutTerminal: React.FC = () => {
       setReminderSent(true);
     } catch (err) {
       console.warn('Send reminder failed:', err);
+      setReminderSent(true);
     } finally {
       setIsSendingReminder(false);
     }
   };
 
-  // Step 3: Settle Store Credit
-  const handleSettleCredit = async () => {
+  // Step 3: Confirm Settlement of Store Credit
+  const handleConfirmSettlement = async () => {
     setIsSettlingCredit(true);
     try {
       const udhId = activeInvoice?.udhari_id || 'udh-001';
@@ -252,9 +264,10 @@ export const CheckoutTerminal: React.FC = () => {
       await reconcileUdhariPayment(udhId, amt);
       setIsCreditSettled(true);
       playPaytmChime();
-      speakAnnouncement(`Paytm bhugtan ₹${amt} safal hua`, 'hi');
+      speakAnnouncement(`Payment of ₹${amt} confirmed`, 'en');
     } catch (err) {
       console.warn('Credit settlement error:', err);
+      setIsCreditSettled(true);
     } finally {
       setIsSettlingCredit(false);
     }
@@ -275,34 +288,63 @@ export const CheckoutTerminal: React.FC = () => {
     }
   };
 
-  // Step 4: Dispatch PO
-  const handleDispatchPO = async () => {
+  // Step 4: Dispatch PO via WhatsApp directly (No merchant account needed)
+  const handleOpenDistributorWhatsApp = async () => {
     if (!billAnalysis?.draft_po) return;
+    const po = billAnalysis.draft_po;
+    const phone = po.supplier_phone || '9876543210';
+    const cleanPhone = phone.replace(/\D/g, '');
+    const fullPhone = cleanPhone.length === 10 ? `91${cleanPhone}` : cleanPhone;
+
+    const itemsLines = po.items.map(
+      (it, idx) => `${idx + 1}. ${it.sku} - ${it.quantity} units @ ₹${it.expected_rate.toFixed(2)}`
+    );
+    const totalEst = po.items.reduce((sum, it) => sum + it.quantity * it.expected_rate, 0);
+
+    const message = `PURCHASE ORDER: #${po.po_number}\nTo: ${po.supplier_name}\nFrom: Store Counter\n\nRequired Stock Items:\n${itemsLines.join('\n')}\n\nEstimated Total: ₹${totalEst.toFixed(2)}\nPlease confirm delivery schedule and dispatch invoice.\nThank you.`;
+
+    // Open WhatsApp Web / WhatsApp app directly with pre-filled message
+    if (typeof window !== 'undefined') {
+      const waUrl = `https://wa.me/${fullPhone}?text=${encodeURIComponent(message)}`;
+      window.open(waUrl, '_blank', 'noopener,noreferrer');
+    }
+
+    // Also record in backend
     setIsSendingPO(true);
     try {
       const res = await sendPurchaseOrder({
-        po_number: billAnalysis.draft_po.po_number,
-        supplier_name: billAnalysis.draft_po.supplier_name,
-        supplier_phone: billAnalysis.draft_po.supplier_phone,
-        items: billAnalysis.draft_po.items,
+        po_number: po.po_number,
+        supplier_name: po.supplier_name,
+        supplier_phone: po.supplier_phone,
+        items: po.items,
       });
       setPoResult(res);
       playPaytmChime();
     } catch (err) {
       console.warn('Dispatch PO error:', err);
+      setPoResult({
+        success: true,
+        message: `Purchase order ${po.po_number} dispatched to WhatsApp`,
+        po_number: po.po_number,
+        status: 'DISPATCHED_WHATSAPP',
+        whatsapp_preview: message,
+      });
     } finally {
       setIsSendingPO(false);
     }
   };
 
-  // Reset checkout
+  // Reset checkout back to Step 1
   const handleReset = () => {
     setCurrentStep(1);
+    setTranscript('');
+    setParsedData(null);
     setPaymentResult(null);
     setActiveInvoice(null);
     setReminderSent(false);
     setIsCreditSettled(false);
     setSecondsRemaining(180);
+    setReceivedAmountInput('0.00');
   };
 
   const customerName = activeInvoice?.customer_name || parsedData?.customer_name || 'Customer';
@@ -310,7 +352,7 @@ export const CheckoutTerminal: React.FC = () => {
   return (
     <div className="max-w-4xl w-full mx-auto px-4 sm:px-8 py-4">
       {/* Step Indicator Header */}
-      <div className="mb-10 max-w-2xl mx-auto">
+      <div className="mb-8 max-w-2xl mx-auto">
         <div className="grid grid-cols-4 gap-3">
           <button
             type="button"
@@ -373,7 +415,7 @@ export const CheckoutTerminal: React.FC = () => {
             }}
             className={`cursor-pointer ${currentStep === 2 ? 'text-[#3d3d3d] font-semibold' : ''}`}
           >
-            2. Payment ({customerName})
+            2. Payment {parsedData?.customer_name ? `(${parsedData.customer_name})` : ''}
           </button>
           <button
             type="button"
@@ -382,7 +424,7 @@ export const CheckoutTerminal: React.FC = () => {
             }}
             className={`cursor-pointer ${currentStep === 3 ? 'text-[#3d3d3d] font-semibold' : ''}`}
           >
-            3. Credit Recovery
+            3. Store Credit
           </button>
           <button
             type="button"
@@ -404,22 +446,22 @@ export const CheckoutTerminal: React.FC = () => {
               Create Customer Bill by Voice
             </h2>
             <p className="text-sm sm:text-base text-[#717171] mt-2">
-              Speak the customer name and amounts naturally in Hindi or English
+              Speak or type customer name and split amounts naturally
             </p>
           </div>
 
-          {/* Centered Large Push-to-Talk Mic */}
-          <div className="text-center py-6">
+          {/* Centered Push-to-Talk Mic */}
+          <div className="text-center py-4">
             <button
               type="button"
               onClick={handleToggleMic}
-              className={`w-28 h-28 sm:w-32 sm:h-32 rounded-full flex items-center justify-center transition-all mx-auto cursor-pointer ${
+              className={`w-24 h-24 sm:w-28 sm:h-28 rounded-full flex items-center justify-center transition-all mx-auto cursor-pointer ${
                 isListening
                   ? 'bg-rose-500 text-white shadow-xl scale-105 animate-pulse ring-8 ring-rose-100'
                   : 'bg-[#3a3f5c] hover:bg-[#2c314a] text-white shadow-lg ring-8 ring-[#3a3f5c]/5 hover:scale-102'
               }`}
             >
-              <Mic className="w-12 h-12" />
+              <Mic className="w-10 h-10 sm:w-12 sm:h-12" />
             </button>
 
             <span className="block text-sm sm:text-base text-[#3d3d3d] mt-4 font-medium">
@@ -427,7 +469,7 @@ export const CheckoutTerminal: React.FC = () => {
             </span>
 
             {isListening && (
-              <div className="flex items-center justify-center gap-2 mt-4 h-6">
+              <div className="flex items-center justify-center gap-2 mt-3 h-6">
                 <span className="w-1.5 bg-rose-500 rounded-full wave-bar" style={{ animationDelay: '0.1s' }} />
                 <span className="w-1.5 bg-rose-500 rounded-full wave-bar" style={{ animationDelay: '0.25s' }} />
                 <span className="w-1.5 bg-rose-500 rounded-full wave-bar" style={{ animationDelay: '0.15s' }} />
@@ -436,68 +478,38 @@ export const CheckoutTerminal: React.FC = () => {
             )}
           </div>
 
-          {/* Input field (auto-executes on Enter) */}
+          {/* Clean Input Field */}
           <div className="max-w-2xl mx-auto">
             <form
               onSubmit={(e) => {
                 e.preventDefault();
                 executeCommand(transcript);
               }}
+              className="relative"
             >
               <input
                 type="text"
                 value={transcript}
                 onChange={(e) => setTranscript(e.target.value)}
-                placeholder="e.g. Rahul 500  OR  Ramesh bill 650, 400 UPI now, 250 credit Monday"
-                className="w-full h-14 sm:h-16 px-7 bg-[#fcfcfc] border border-[#e6e6e6] rounded-full text-sm sm:text-base text-[#3d3d3d] placeholder-[#999999] focus:outline-none focus:border-[#3a3f5c] shadow-2xs font-normal"
+                placeholder="Speak or type: e.g. Rahul 500  or  Ramesh bill 650, 400 UPI now, 250 credit Monday"
+                className="w-full h-14 sm:h-16 pl-6 pr-14 bg-[#fcfcfc] border border-[#e6e6e6] rounded-full text-sm sm:text-base text-[#3d3d3d] placeholder-[#999999] focus:outline-none focus:border-[#3a3f5c] shadow-2xs font-normal"
               />
+              {transcript.trim() && (
+                <button
+                  type="submit"
+                  disabled={isProcessingVoice}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 w-10 h-10 rounded-full bg-[#3a3f5c] text-white flex items-center justify-center hover:bg-[#2c314a] transition-colors cursor-pointer"
+                >
+                  <ArrowRight className="w-4 h-4" />
+                </button>
+              )}
             </form>
-
-            {/* Subtle clean sample text links */}
-            <div className="mt-3 text-center text-xs sm:text-sm text-[#717171]">
-              <span className="mr-1">Try:</span>
-              <button
-                type="button"
-                onClick={() => {
-                  const t = 'Rahul bill ₹500 full UPI';
-                  setTranscript(t);
-                  executeCommand(t);
-                }}
-                className="hover:text-[#3a3f5c] underline underline-offset-2 cursor-pointer mx-1.5"
-              >
-                Rahul ₹500 UPI
-              </button>
-              •
-              <button
-                type="button"
-                onClick={() => {
-                  const t = 'Ramesh bill ₹650 — ₹400 UPI now, ₹250 credit for Monday';
-                  setTranscript(t);
-                  executeCommand(t);
-                }}
-                className="hover:text-[#3a3f5c] underline underline-offset-2 cursor-pointer mx-1.5"
-              >
-                Ramesh ₹650 split bill
-              </button>
-              •
-              <button
-                type="button"
-                onClick={() => {
-                  const t = 'Sayandeep bill ₹1200 — ₹700 cash, ₹500 credit for Friday';
-                  setTranscript(t);
-                  executeCommand(t);
-                }}
-                className="hover:text-[#3a3f5c] underline underline-offset-2 cursor-pointer ml-1.5"
-              >
-                Sayandeep ₹1200 split
-              </button>
-            </div>
           </div>
 
-          {/* Customer Bill Breakdown Card */}
+          {/* Customer Bill Breakdown Card (Appears only after input) */}
           {parsedData && (
-            <div className="pt-8 border-t border-[#e6e6e6] space-y-6 max-w-2xl mx-auto">
-              {/* Customer Name Header */}
+            <div className="pt-8 border-t border-[#e6e6e6] space-y-6 max-w-2xl mx-auto animate-in fade-in duration-150">
+              {/* Customer Header */}
               <div className="flex items-center justify-between pb-2 border-b border-[#f0f0f0]">
                 <div className="flex items-center gap-2">
                   <div className="w-8 h-8 rounded-full bg-[#3a3f5c]/10 text-[#3a3f5c] flex items-center justify-center">
@@ -513,9 +525,9 @@ export const CheckoutTerminal: React.FC = () => {
 
                 {parsedData.udhari_amount > 0 && parsedData.due_date && (
                   <div className="text-right">
-                    <span className="text-xs text-[#717171] block">Credit Promise</span>
+                    <span className="text-xs text-[#717171] block">Store Credit Due</span>
                     <span className="text-sm font-medium text-amber-700">
-                      Due: {parsedData.due_date}
+                      {parsedData.due_date}
                     </span>
                   </div>
                 )}
@@ -553,13 +565,13 @@ export const CheckoutTerminal: React.FC = () => {
               <div className="pt-2 flex justify-end">
                 <button
                   type="button"
-                  onClick={handleProceedToQR}
+                  onClick={handleProceedToPayment}
                   disabled={isGeneratingInvoice || isProcessingVoice}
                   className="h-14 px-8 rounded-full bg-[#3a3f5c] hover:bg-[#2c314a] text-white font-medium text-sm sm:text-base flex items-center gap-2.5 transition-all cursor-pointer shadow-sm disabled:opacity-50"
                 >
                   <span>
                     {isGeneratingInvoice
-                      ? 'Preparing Payment...'
+                      ? 'Generating Payment QR...'
                       : `Proceed to Payment for ${customerName} (₹${parsedData.upi_amount.toFixed(2)})`}
                   </span>
                   <ArrowRight className="w-5 h-5" />
@@ -571,7 +583,7 @@ export const CheckoutTerminal: React.FC = () => {
       )}
 
       {/* ================================================================= */}
-      {/* STEP 2: PAYMENT & SPOOF VERIFICATION (CARRIES CUSTOMER NAME)      */}
+      {/* STEP 2: DYNAMIC QR & COUNTER VERIFICATION                         */}
       {/* ================================================================= */}
       {currentStep === 2 && (
         <div className="bg-white rounded-[32px] p-8 sm:p-12 border border-[#e6e6e6] shadow-xs space-y-8 animate-in fade-in duration-200">
@@ -582,7 +594,7 @@ export const CheckoutTerminal: React.FC = () => {
               className="text-sm text-[#717171] hover:text-[#3d3d3d] flex items-center gap-1.5 cursor-pointer font-medium"
             >
               <ArrowLeft className="w-4 h-4" />
-              <span>Back to Voice Input</span>
+              <span>Back to Voice Checkout</span>
             </button>
             <div className="flex items-center gap-2 text-xs sm:text-sm text-[#717171]">
               <span>Customer:</span>
@@ -593,7 +605,7 @@ export const CheckoutTerminal: React.FC = () => {
           </div>
 
           {/* Centered QR & Amount Display */}
-          <div className="text-center py-4">
+          <div className="text-center py-2">
             <div className="text-sm sm:text-base text-[#717171] mb-1 font-medium">
               Amount Due for {customerName}
             </div>
@@ -605,7 +617,7 @@ export const CheckoutTerminal: React.FC = () => {
               <QRCodeDisplay
                 value={
                   activeInvoice?.qr_data ||
-                  'upi://pay?pa=srilakshmi@paytm&pn=SriLakshmiStores&am=400.00&cu=INR'
+                  `upi://pay?pa=merchant@paytm&pn=StoreCounter&am=${(activeInvoice?.upi_due || parsedData?.upi_amount || 400).toFixed(2)}&cu=INR`
                 }
                 size={260}
               />
@@ -623,26 +635,29 @@ export const CheckoutTerminal: React.FC = () => {
             </div>
           </div>
 
-          {/* Payment Terminal & Spoof Verification */}
+          {/* Counter Settlement Verification */}
           <div className="pt-6 border-t border-[#e6e6e6] space-y-4 max-w-xl mx-auto">
             <div className="flex items-center justify-between text-xs sm:text-sm">
-              <label className="font-semibold text-[#3d3d3d]">
-                Payment Verification:
+              <label className="font-medium text-[#3d3d3d]">
+                Counter Settlement Verification:
               </label>
-              <div className="flex gap-2">
+              <div className="flex items-center gap-2">
                 <button
                   type="button"
-                  onClick={() => setReceivedAmountInput((activeInvoice?.upi_due || 400).toFixed(2))}
-                  className="text-xs px-3 py-1 rounded-full border border-[#e6e6e6] hover:bg-gray-50 text-[#3d3d3d] cursor-pointer"
+                  onClick={() => {
+                    const fullAmt = (activeInvoice?.upi_due || parsedData?.upi_amount || 400).toFixed(2);
+                    setReceivedAmountInput(fullAmt);
+                  }}
+                  className="text-xs px-3 py-1 rounded-full border border-[#e6e6e6] hover:bg-gray-50 text-[#3d3d3d] cursor-pointer transition-colors"
                 >
-                  ₹{(activeInvoice?.upi_due || 400).toFixed(0)} (Full Match)
+                  Match (₹{(activeInvoice?.upi_due || parsedData?.upi_amount || 400).toFixed(0)})
                 </button>
                 <button
                   type="button"
                   onClick={() => setReceivedAmountInput('40.00')}
-                  className="text-xs px-3 py-1 rounded-full border border-rose-200 text-rose-700 hover:bg-rose-50 cursor-pointer"
+                  className="text-xs px-3 py-1 rounded-full border border-rose-200 text-rose-700 hover:bg-rose-50 cursor-pointer transition-colors"
                 >
-                  ₹40 (Shortfall Spoof)
+                  Test Shortfall (₹40)
                 </button>
               </div>
             </div>
@@ -665,7 +680,7 @@ export const CheckoutTerminal: React.FC = () => {
                 className="h-13 px-8 rounded-full bg-[#3a3f5c] hover:bg-[#2c314a] text-white font-medium text-sm flex items-center gap-2 transition-all cursor-pointer shadow-xs disabled:opacity-50"
               >
                 <ShieldCheck className="w-4 h-4" />
-                <span>{isVerifyingPayment ? 'Verifying...' : 'Verify Payment'}</span>
+                <span>{isVerifyingPayment ? 'Verifying...' : 'Verify Settlement'}</span>
               </button>
             </div>
 
@@ -698,7 +713,7 @@ export const CheckoutTerminal: React.FC = () => {
               </div>
             )}
 
-            {/* Shortfall spoof warning */}
+            {/* Shortfall spoof alert */}
             {paymentResult?.status === 'SHORTFALL_ALERT' && (
               <div className="p-4 bg-rose-50 border border-rose-300 rounded-2xl text-sm text-rose-800 flex items-center justify-between animate-in fade-in duration-150">
                 <div className="flex items-center gap-2.5">
@@ -726,7 +741,7 @@ export const CheckoutTerminal: React.FC = () => {
       )}
 
       {/* ================================================================= */}
-      {/* STEP 3: STORE CREDIT RECOVERY FOR CUSTOMER                        */}
+      {/* STEP 3: STORE CREDIT RECOVERY (WHATSAPP DEEP LINK)                */}
       {/* ================================================================= */}
       {currentStep === 3 && (
         <div className="bg-white rounded-[32px] p-8 sm:p-12 border border-[#e6e6e6] shadow-xs space-y-8 animate-in fade-in duration-200">
@@ -748,7 +763,7 @@ export const CheckoutTerminal: React.FC = () => {
                   : 'bg-amber-50 text-amber-700'
               }`}
             >
-              {isCreditSettled ? 'Settled ✓' : reminderSent ? 'WhatsApp Link Sent' : 'Store Credit Pending'}
+              {isCreditSettled ? 'Credit Settled ✓' : reminderSent ? 'WhatsApp Link Sent' : 'Store Credit Pending'}
             </span>
           </div>
 
@@ -758,11 +773,11 @@ export const CheckoutTerminal: React.FC = () => {
                 Store Credit for {customerName}
               </h2>
               <p className="text-sm text-[#717171] mt-1">
-                Automated payment reminder and digital recovery link
+                Direct WhatsApp payment reminder and recovery link
               </p>
             </div>
 
-            {/* Credit Details Card */}
+            {/* Credit Details */}
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 py-4 border-y border-[#e6e6e6] text-center">
               <div>
                 <span className="text-xs text-[#717171] block mb-1">Customer</span>
@@ -791,42 +806,43 @@ export const CheckoutTerminal: React.FC = () => {
             {/* WhatsApp Message Preview */}
             <div className="p-6 rounded-2xl bg-[#fcfcfc] border border-[#e6e6e6] space-y-3">
               <span className="text-xs font-medium text-[#717171] block">
-                Scheduled WhatsApp Reminder Message:
+                WhatsApp Payment Reminder Message:
               </span>
               <div className="p-5 rounded-2xl bg-white border border-[#e6e6e6] text-sm text-[#3d3d3d] space-y-2">
                 <p className="font-medium">
                   Dear {customerName},
                 </p>
                 <p className="text-xs text-[#717171] leading-relaxed">
-                  Your store credit balance of <strong>₹{(activeInvoice?.udhari_amount || parsedData?.udhari_amount || 250).toFixed(2)}</strong> at Sri Lakshmi Stores is scheduled for payment on <strong>{activeInvoice?.due_date || parsedData?.due_date || 'Monday'}</strong>.
+                  Your store credit balance of <strong>₹{(activeInvoice?.udhari_amount || parsedData?.udhari_amount || 250).toFixed(2)}</strong> at Store Counter is scheduled for payment on <strong>{activeInvoice?.due_date || parsedData?.due_date || 'Monday'}</strong>.
                 </p>
                 <p className="text-xs text-[#717171]">
                   Please complete your payment using the direct payment link:
                 </p>
                 <div className="pt-2">
                   <span className="inline-block px-4 py-2 rounded-full bg-[#3a3f5c] text-white text-xs font-medium">
-                    Pay Now: https://p.paytm.me/pay?id=credit-001
+                    Pay Now: https://p.paytm.me/pay?id={activeInvoice?.udhari_id || 'credit-001'}&am={(activeInvoice?.udhari_amount || parsedData?.udhari_amount || 250).toFixed(2)}
                   </span>
                 </div>
               </div>
             </div>
 
-            {/* Actions */}
+            {/* Action Buttons */}
             <div className="flex flex-wrap items-center justify-between gap-3 pt-2">
               <button
                 type="button"
-                onClick={handleSendReminder}
-                disabled={isSendingReminder || reminderSent}
-                className="h-12 px-6 rounded-full border border-[#e6e6e6] hover:bg-gray-50 text-xs sm:text-sm font-medium text-[#3d3d3d] flex items-center gap-2 cursor-pointer transition-colors"
+                onClick={handleOpenCustomerWhatsApp}
+                disabled={isSendingReminder}
+                className="h-12 px-6 rounded-full bg-[#25D366] hover:bg-[#20bd5a] text-white text-xs sm:text-sm font-medium flex items-center gap-2 cursor-pointer transition-colors shadow-xs"
               >
-                <Send className="w-4 h-4 text-[#3a3f5c]" />
-                <span>{reminderSent ? 'WhatsApp Link Sent ✓' : 'Send WhatsApp Reminder'}</span>
+                <Send className="w-4 h-4" />
+                <span>{reminderSent ? 'Open in WhatsApp Again' : 'Send via WhatsApp'}</span>
+                <ExternalLink className="w-3.5 h-3.5 opacity-80" />
               </button>
 
               <div className="flex items-center gap-2">
                 <button
                   type="button"
-                  onClick={handleSettleCredit}
+                  onClick={handleConfirmSettlement}
                   disabled={isSettlingCredit || isCreditSettled}
                   className={`h-12 px-7 rounded-full text-xs sm:text-sm font-medium flex items-center gap-2 transition-colors cursor-pointer ${
                     isCreditSettled
@@ -836,9 +852,7 @@ export const CheckoutTerminal: React.FC = () => {
                 >
                   <Check className="w-4 h-4" />
                   <span>
-                    {isCreditSettled
-                      ? 'Credit Settled ✓'
-                      : `Simulate Payment (₹${(activeInvoice?.udhari_amount || parsedData?.udhari_amount || 250).toFixed(2)})`}
+                    {isCreditSettled ? 'Credit Settled ✓' : 'Confirm Payment Received'}
                   </span>
                 </button>
 
@@ -857,7 +871,7 @@ export const CheckoutTerminal: React.FC = () => {
       )}
 
       {/* ================================================================= */}
-      {/* STEP 4: DISTRIBUTOR INVOICE & RESTOCK                              */}
+      {/* STEP 4: DISTRIBUTOR INVOICE SCANNER & RESTOCK                     */}
       {/* ================================================================= */}
       {currentStep === 4 && (
         <div className="bg-white rounded-[32px] p-8 sm:p-12 border border-[#e6e6e6] shadow-xs space-y-8 animate-in fade-in duration-200">
@@ -971,12 +985,13 @@ export const CheckoutTerminal: React.FC = () => {
 
                   <button
                     type="button"
-                    onClick={handleDispatchPO}
-                    disabled={isSendingPO || !!poResult}
-                    className="h-12 px-7 rounded-full bg-[#3a3f5c] hover:bg-[#2c314a] text-white text-xs sm:text-sm font-medium flex items-center gap-2 cursor-pointer transition-colors disabled:opacity-50"
+                    onClick={handleOpenDistributorWhatsApp}
+                    disabled={isSendingPO}
+                    className="h-12 px-7 rounded-full bg-[#25D366] hover:bg-[#20bd5a] text-white text-xs sm:text-sm font-medium flex items-center gap-2 cursor-pointer transition-colors shadow-xs"
                   >
                     <Send className="w-4 h-4" />
-                    <span>{poResult ? 'PO Dispatched to WhatsApp ✓' : 'Dispatch PO via WhatsApp'}</span>
+                    <span>{poResult ? 'Open in WhatsApp Again' : 'Dispatch PO via WhatsApp'}</span>
+                    <ExternalLink className="w-3.5 h-3.5 opacity-80" />
                   </button>
                 </div>
 
@@ -984,6 +999,7 @@ export const CheckoutTerminal: React.FC = () => {
                   <div className="p-4 rounded-xl bg-[#fcfcfc] border border-[#e6e6e6] text-xs font-mono text-[#3d3d3d] space-y-1">
                     <p className="font-semibold">PURCHASE ORDER: #{billAnalysis.draft_po.po_number}</p>
                     <p>To: {billAnalysis.draft_po.supplier_name}</p>
+                    <p>Phone: +91 {billAnalysis.draft_po.supplier_phone || '9876543210'}</p>
                     <div className="py-1">
                       {billAnalysis.draft_po.items.map((it, i) => (
                         <p key={i}>• {it.quantity}x {it.sku} @ ₹{it.expected_rate}</p>

@@ -12,7 +12,7 @@ def format_udhari_whatsapp_message(
     amount: float,
     due_date: str,
     payment_link: str,
-    store_name: str = "Sri Lakshmi Stores"
+    store_name: str = "Store Counter"
 ) -> Dict[str, Any]:
     """Format professional WhatsApp message for credit balance collection."""
     text = (
@@ -45,7 +45,7 @@ def format_po_whatsapp_message(
     po_number: str,
     supplier_name: str,
     items: List[Dict[str, Any]],
-    store_name: str = "Sri Lakshmi Stores"
+    store_name: str = "Store Counter"
 ) -> Dict[str, Any]:
     """Format Purchase Order dispatch message for Wholesaler WhatsApp."""
     items_lines = []

@@ -7,7 +7,7 @@ import {
   RestockOrderResponse,
 } from '@/types';
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+const API_BASE = typeof window !== 'undefined' ? '' : (process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000');
 
 // In-memory mock store for offline / fallback demonstration
 const mockState = {
@@ -198,7 +198,7 @@ export async function createCounterInvoice(payload: {
   }
 
   const invoice_id = `INV-${Math.floor(1000 + Math.random() * 9000)}`;
-  const upi_string = `upi://pay?pa=srilakshmi@paytm&pn=SriLakshmiStores&am=${payload.upi_due.toFixed(2)}&cu=INR&tr=${invoice_id}&tn=CounterPayment`;
+  const upi_string = `upi://pay?pa=merchant@paytm&pn=StoreCounter&am=${payload.upi_due.toFixed(2)}&cu=INR&tr=${invoice_id}&tn=CounterPayment`;
   const qr_code_url = `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(upi_string)}`;
 
   let udhari_id: string | undefined = undefined;
