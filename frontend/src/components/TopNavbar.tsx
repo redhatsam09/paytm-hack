@@ -17,9 +17,9 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({ backendConnected }) => {
             <Radio className="w-3.5 h-3.5" />
           </div>
           <div className="flex items-baseline gap-2">
-            <span className="font-semibold text-base text-[#1d1d1f] tracking-tight">Vani</span>
+            <span className="font-semibold text-base text-[#1d1d1f] tracking-tight">Paytm Counter</span>
             <span className="hidden sm:inline text-xs text-[#86868b] font-normal">
-              Autonomous Counter &amp; WhatsApp Agent
+              Autonomous Voice &amp; Store Credit Agent
             </span>
           </div>
         </div>

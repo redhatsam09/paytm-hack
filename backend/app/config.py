@@ -1,8 +1,10 @@
 import os
 from pathlib import Path
 from pydantic import BaseModel
+from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+load_dotenv(BASE_DIR / ".env")
 STATIC_DIR = BASE_DIR / "static"
 AUDIO_DIR = STATIC_DIR / "audio"
 DB_PATH = BASE_DIR / "paytm_merchant.db"

@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect } from 'react';
 import { TopNavbar } from '@/components/TopNavbar';
-import { DualDeviceSimulator } from '@/components/DualDeviceSimulator';
+import { CheckoutTerminal } from '@/components/CheckoutTerminal';
 import { checkBackendHealth } from '@/lib/api';
 
 export default function Home() {
@@ -26,16 +26,13 @@ export default function Home() {
   }, []);
 
   return (
-    <div className="min-h-screen bg-[#fcfcfc] text-[#3d3d3d] flex flex-col font-sans relative selection:bg-[#3a3f5c] selection:text-white">
-      {/* Subtle atmospheric halo glow */}
-      <div className="halo-glow pointer-events-none" />
-
-      {/* Clean quiet navbar */}
+    <div className="min-h-screen bg-[#f5f5f7] text-[#1d1d1f] flex flex-col font-sans relative selection:bg-[#0071e3] selection:text-white">
+      {/* Clean Apple Light navbar */}
       <TopNavbar backendConnected={backendConnected} />
 
-      {/* Dual-Device Stage Simulator */}
-      <main className="flex-1 relative z-10 flex flex-col justify-center py-4 sm:py-6">
-        <DualDeviceSimulator />
+      {/* Smooth Realistic Usecase Workflow Terminal */}
+      <main className="flex-1 relative z-10 flex flex-col justify-center py-6 sm:py-10">
+        <CheckoutTerminal />
       </main>
     </div>
   );
