@@ -52,48 +52,14 @@ pytest -v
 
 ## 2. API Endpoints Reference
 
-### 2.1 Voice & Intent Parser (`< 600ms` latency)
+### 2.1 Voice & Intent Parser
 - **`POST /api/voice/parse`**
-  Parses natural language speech transcripts (English, Hindi, Hinglish) into structured counter split entities.
-  - **Sample Request:**
-    ```json
-    {
-      "transcript_text": "Customer bill 650, 400 UPI now, 250 udhari for Monday, Ramesh 9876543210"
-    }
-    ```
-  - **Sample Response:**
-    ```json
-    {
-      "success": true,
-      "transcript": "Customer bill 650, 400 UPI now, 250 udhari for Monday, Ramesh 9876543210",
-      "latency_ms": 1.84,
-      "data": {
-        "total_bill": 650.0,
-        "upi_amount": 400.0,
-        "udhari_amount": 250.0,
-        "cash_amount": 0.0,
-        "due_date": "2026-11-16",
-        "customer_name": "Ramesh",
-        "customer_phone": "9876543210",
-        "items": []
-      }
-    }
-    ```
+  Parses natural language speech transcripts (English, Hindi, Hinglish) into structured counter split entities. Latency depends on the configured speech and language-model providers.
+  The request accepts `transcript_text` and an optional language. The response contains the recognized transcript, measured latency, and parsed bill fields: total, UPI, credit, cash, due date, customer name, and phone.
 
 ### 2.2 Counter & Dynamic QR Generation
 - **`POST /api/counter/create-invoice`**
-  Generates an amount-locked NPCI/Paytm UPI QR payload and base64 PNG data URL, saves transaction, initializes Udhari ledger draft if credit is split, and broadcasts to customer display screen.
-  - **Sample Request:**
-    ```json
-    {
-      "total_bill": 650.0,
-      "upi_due": 400.0,
-      "udhari_amount": 250.0,
-      "customer_name": "Ramesh",
-      "customer_phone": "9876543210",
-      "due_date": "2026-11-17"
-    }
-    ```
+  Saves the transaction and Udhari ledger draft. With Paytm merchant credentials it requests a Paytm Dynamic QR. Without them the API returns a `DEMO` placeholder QR; the active web UI intentionally does not display or treat that placeholder as payable.
 - **`GET /api/counter/active`**
   Retrieves active counter invoice state for dual-screen synchronization.
 - **`POST /api/counter/reset`**
@@ -108,21 +74,15 @@ pytest -v
   Queries Paytm Transaction Status API and only settles a Paytm-issued QR order after a verified exact amount.
 - **`POST /api/paytm/demo-fixture`**
   Runs a fixed server-generated HMAC fixture (`exact_match` or `shortfall`) through the reconciliation path. This exercises the app's matching and alert behavior, but is not a Paytm signature and does not move money. Disabled once Paytm credentials are configured.
-  - **Exact amount match:**
-    - Status: `SUCCESS`
-    - Audio Announcement: `"Paytm par ₹400 prapt hue"`
-    - Dual-Screen: Broadcasts green tick success animation
-    - WhatsApp: Prepares customer credit collection link
-  - **Shortfall or amount mismatch:**
-    - Status: `SHORTFALL_ALERT`
-    - Audio Warning: `"Savdhaan! Keval ₹40 prapt hue hain! ₹360 baaki hai!"`
-    - Dual-Screen: Broadcasts red emergency siren warning with deficit amount
+  This endpoint remains available for backend integration checks; it is not exposed as a payment control in the active web UI. It is not a Paytm signature and does not move money.
+  - Exact amount match returns `SUCCESS`.
+  - Shortfall returns `SHORTFALL_ALERT` with the deficit amount.
 
 ### 2.4 WhatsApp & Partial Udhari Ledger
 - **`GET /api/udhari/list`**
   Lists all ledger records (UNPAID, SETTLED). Preparing a WhatsApp draft does not change settlement state.
 - **`POST /api/udhari/send-reminder`**
-  Prepares a WhatsApp message and payment-link preview. The merchant must review and send it; this endpoint does not send WhatsApp messages.
+  Prepares a WhatsApp message payload. It does not send WhatsApp messages. The active web UI prepares a reminder without presenting an unverified Paytm collection link.
 - **`POST /api/udhari/reconcile`**
   Local demo reconciliation only. It rejects client-supplied settlement for invoices created in Paytm live mode.
 - **`POST /api/udhari/demo-settlement-fixture`**
@@ -132,7 +92,7 @@ pytest -v
 
 ### 2.5 Snap-to-Restock Agent (Vision OCR & Wholesale Price Auditor)
 - **`POST /api/restock/analyze-invoice`**
-  Accepts a CSV (`sku,quantity,unit_rate`) for a deterministic price audit, or an image/PDF for Gemini OCR when `GEMINI_API_KEY` is configured. Extracted rates are compared with supplier history and the draft PO is built from the uploaded line items. A request without a file uses the labeled local sample fixture.
+  Accepts a CSV (`sku,quantity,unit_rate`) for a deterministic price audit, or an image/PDF for Gemini OCR when `GEMINI_API_KEY` is configured. Extracted rates are compared with supplier history and the draft PO is built from the uploaded line items. A request without a file selects the backend's explicitly labeled local fixture; the active web UI always requires an uploaded file.
 - **`GET /api/restock/price-history`**
   Returns historical wholesale rates for staple SKUs.
 - **`POST /api/restock/send-po`**
@@ -142,13 +102,13 @@ pytest -v
 
 ### 2.6 Server-Sent Events (SSE)
 - **`GET /api/events`**
-  Continuous SSE stream for the dual-screen interface. Events pushed:
+  Continuous SSE stream for the counter interface. Events pushed:
   - `INVOICE_CREATED`
   - `PAYMENT_SUCCESS`
   - `SHORTFALL_ALERT`
   - `COUNTER_RESET`
   - `UDHARI_SETTLED`
-  - `PO_DISPATCHED`
+  - `PO_DRAFT_READY`
 
 ### 2.7 Runtime Configuration & Integration Settings
 - **`GET /api/settings`**

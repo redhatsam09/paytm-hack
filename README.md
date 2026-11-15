@@ -1,133 +1,92 @@
-# Autonomous Voice-to-QR, Store Credit & Restock Agent
+# Paytm Soundbox Merchant Counter Agent
 
-Paytm Build for India AI Hackathon - Chennai Edition  
-Track 1: Merchant Growth AI  
-Real-time counter execution using a Dual-Screen Soundbox Simulator and WhatsApp Agent.
+A voice-first counter workflow concept for small retailers. The web app combines bill entry, amount-linked payment handling, customer credit tracking, and distributor invoice auditing in a Soundbox-style interface.
 
----
+## What the current prototype does
 
-## Executive Summary
+### 1. Voice checkout
 
-Across more than 12 million Indian retail merchants, UPI processes over 83% of digital transactions. However, counter checkout and bookkeeping remain manual and disconnected:
+The merchant can speak or type a bill. The parser extracts the customer, total, UPI amount, store-credit amount, contact number, and promised date. The merchant reviews the split before creating a backend invoice and credit-ledger entry.
 
-1. Zero Typing Latency: Merchants serve 3 to 5 customers per minute during peak checkout rush hours. Opening dedicated mobile apps and typing customer names or credit balances creates counter bottlenecks.
-2. Passive Soundboxes: Standard hardware soundboxes merely announce incoming digital credits after a buyer initiates them. They have no prior context regarding the invoice total, split balances, or store credit agreements.
-3. Three Daily Revenue Leaks:
-   - Split Payments and Unrecorded Credit: Bills split between immediate digital payment and delayed credit are frequently forgotten during peak hours.
-   - Short Payments and Static QR Spoofing: Buyers manually enter incorrect amounts on static printed QR stickers (such as paying 40 instead of 400) without real-time counter mismatch detection.
-   - Paper Invoices and Price Creep: Distributor paper bills are filed manually without tracking silent supplier price increases or automated restocking triggers.
+### 2. Payment QR and mismatch guard
 
-This solution transforms the counter Soundbox into an active, voice-driven execution terminal paired with an automated WhatsApp recovery and restock agent.
+With Paytm Dynamic QR merchant credentials configured, the backend requests an amount-locked QR and checks Paytm’s transaction status. Only gateway results drive the match or shortfall announcement. Without those credentials, the UI does not show a placeholder QR and explains that payment verification is unavailable.
 
----
+### 3. Store-credit recovery
 
-## Core Demonstration Workflows
+Credit and due-date details come from the invoice. The merchant can prepare a WhatsApp reminder for review and manually press Send. The current UI does not send messages automatically or verify payments made through a credit link.
 
-### Flow 1: Voice-to-Dynamic-QR and Store Credit Split
-- Voice Command: The merchant speaks naturally: "Customer bill 650 - 400 UPI now, 250 credit for Monday, Ramesh 9876543210".
-- Fast Intent Decomposition: The agent extracts Total (650), Digital Due (400), Store Credit (250), Due Date (Monday), and Customer Name (Ramesh).
-- Dynamic QR Generation: The counter display immediately generates a dynamic amount-locked QR code locked to exactly 400 with a 180-second countdown timer.
-- Webhook Confirmation: A matching 400 payment webhook triggers an immediate confirmation chime, records the 250 credit balance into the persistent ledger, and schedules an automated WhatsApp digital payment link for the customer.
+### 4. Distributor restock audit
 
-### Flow 2: Real-Time Shortfall Mismatch and Spoof Defense
-- Expected Transaction: Counter expects 400 UPI payment.
-- Spoof / Shortfall Attempt: The incoming webhook reports 40 (or a simulated payment spoof).
-- Immediate Alert: The terminal flags a shortfall of 360, transitions the screen to an urgent alert state, and triggers an immediate regional audio warning before the customer leaves the counter.
+Upload a distributor invoice photo/PDF for Gemini Vision OCR, or a CSV with `sku,quantity,unit_rate` columns for a deterministic audit. Extracted rates are compared with stored price history; increases of 5% or more are flagged. The purchase-order draft uses the uploaded invoice lines and historical rates where available. The prototype has no inventory-count feed, so it does not identify low-stock items. The merchant reviews the draft and sends it through WhatsApp.
 
-### Flow 3: WhatsApp Snap-to-Restock Agent
-- Invoice Capture: The merchant uploads or photographs a paper delivery invoice on WhatsApp.
-- Vision OCR Extraction: The agent extracts line items, quantities, unit prices, and supplier metadata.
-- Price Creep Detection: The system audits current unit rates against historical purchase records in the database, automatically flagging supplier price increases (such as Sunflower Oil increasing from 140 to 155, representing a 10.7% price hike).
-- Purchase Order Dispatch: The agent automatically drafts a standardized purchase order locked to baseline rates and dispatches it directly to the supplier via WhatsApp.
+## Integration status
 
----
+- **Sarvam** handles speech transcription when `SARVAM_API_KEY` is configured.
+- **Groq** can parse voice intent when `GROQ_API_KEY` is configured; typed input remains available.
+- **Gemini Vision** analyzes uploaded invoice images/PDFs when `GEMINI_API_KEY` is configured.
+- **Paytm Dynamic QR and settlement verification** require Paytm-issued merchant credentials. An API key alone is not sufficient.
+- **WhatsApp** actions open a message draft for merchant review. The current UI does not call WhatsApp Cloud API to send it.
 
-## Technology Architecture and Stack
+No API secrets belong in frontend source or Git. Put local credentials in `backend/.env`, which is ignored by Git.
 
-| System Layer | Technology | Function |
-| :--- | :--- | :--- |
-| Speech and Regional Voice | Sarvam AI Speech API, Whisper | Voice parsing supporting English and regional dialects |
-| Agentic Intent Decomposition | Groq (Llama-3.3-70B), LangGraph | Sub-600ms extraction of transaction entities and amounts |
-| Invoice Vision OCR | Google Gemini 2.5 Flash Vision API | Tabular line-item extraction from photographed paper invoices |
-| Payment and Messaging | Paytm Dynamic QR, WhatsApp Cloud API | Amount-locked QR payloads and automated digital collection links |
-| Backend Application Server | FastAPI, SQLite, Server-Sent Events | Transaction state engine, UTR listener, audio alert synthesizer |
-| Frontend Workflow UI | Next.js 16, React 19, Tailwind CSS | Point-of-sale checkout workflow with Sarvam Sovereign AI styling |
+## Run locally
 
----
+Use two terminals from the repository root.
 
-## Getting Started
+Backend:
 
-### 1. Prerequisites
-- Python 3.10 or higher
-- Node.js 18 or higher
-- npm 9 or higher
-
-### 2. Backend Setup
 ```bash
 cd backend
 pip install -r requirements.txt
-bash start.sh
+./start.sh
 ```
-- API Base URL: `http://localhost:8000`
-- Interactive API Documentation: `http://localhost:8000/docs`
-- Health Check: `http://localhost:8000/health`
 
-### 3. Frontend Setup
+The API runs at `http://localhost:8000`; interactive docs are at `http://localhost:8000/docs`.
+
+Frontend:
+
 ```bash
 cd frontend
 npm install
-npm run build
-npm start
+npm run dev
 ```
-- Web Application: `http://localhost:3000`
 
-### 4. Running Automated End-to-End Tests
+Open `http://localhost:3000`. Next.js proxies `/api/*` and `/health` to the local backend.
+
+## Local environment variables
+
+Add only the integrations you have access to in `backend/.env`:
+
+```dotenv
+SARVAM_API_KEY=
+GROQ_API_KEY=
+GEMINI_API_KEY=
+PAYTM_ENV=staging
+PAYTM_MID=
+PAYTM_MERCHANT_KEY=
+PAYTM_POS_ID=
+PAYTM_CLIENT_ID=
+PAYTM_PUBLIC_WEBHOOK_URL=
+PAYTM_WEBHOOK_SECRET=
+WHATSAPP_API_TOKEN=
+```
+
+Paytm Dynamic QR is enabled only when the required Paytm merchant credentials are present. Follow the backend README for Paytm staging setup.
+
+## Verification
+
+Run the repository’s integration checks with:
+
 ```bash
 python3 tests/test_e2e_flows.py
 ```
-All 9 test cases validate end-to-end functionality across voice parsing, invoice creation, payment matching, shortfall detection, ledger reconciliation, and restock OCR.
 
----
+These checks exercise local API behavior; they do not prove that a live Paytm payment or WhatsApp message was completed.
 
-## Configuration and Runtime Integration
+## Repository layout
 
-The terminal operates with a zero-setup fallback engine out of the box, ensuring that all workflows can be demonstrated locally without external dependencies. 
-
-For live production deployments, credentials can be set via environment variables or runtime configuration:
-- `SARVAM_API_KEY`: Indic regional speech recognition
-- `GROQ_API_KEY`: Low-latency Llama-3.3-70B intent parsing
-- `GEMINI_API_KEY`: Vision OCR for distributor invoice analysis
-- `WHATSAPP_API_TOKEN`: WhatsApp Business Cloud API access token
-- `PAYTM_MERCHANT_VPA`: Counter UPI merchant payment address
-
----
-
-## Repository Structure
-
-```
-.
-|-- PRD.md                         Product Requirements Document
-|-- README.md                      Project Overview and Execution Guide
-|-- backend/                       FastAPI Application Server
-|   |-- app/
-|   |   |-- main.py                FastAPI application entry point
-|   |   |-- config.py              Runtime settings and environment variables
-|   |   |-- database.py            SQLite async database and seed data
-|   |   |-- models.py              SQLAlchemy ORM models
-|   |   |-- schemas.py             Pydantic v2 validation models
-|   |   |-- routers/               API endpoints (voice, counter, webhook, udhari, restock, settings)
-|   |   `-- services/              Business logic (voice parser, QR generator, TTS, WhatsApp)
-|   |-- requirements.txt           Python dependencies
-|   |-- start.sh                   Backend startup script
-|   `-- tests/                     Backend test suite
-|-- frontend/                      Next.js 16 Workflow Application
-|   |-- src/
-|   |   |-- app/                   Application layout and page routes
-|   |   |-- components/            Workflow components (CheckoutTerminal, TopNavbar, QRCodeDisplay)
-|   |   `-- lib/                   API client and Web Audio helpers
-|   |-- package.json               Node dependencies
-|   `-- tsconfig.json              TypeScript configuration
-`-- tests/                         Integration Test Suite
-    |-- test_e2e_flows.py          Automated end-to-end test verification
-    `-- run_verification.py        Standalone verification runner
-```
+- `backend/app/`: FastAPI routes, database models, and speech, payment, and invoice-analysis services.
+- `frontend/src/components/CheckoutTerminal.tsx`: active four-stage merchant workflow and Soundbox-style display.
+- `frontend/src/lib/api.ts`: frontend API client.
+- `tests/`: integration checks and invoice fixtures.
