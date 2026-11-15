@@ -1,6 +1,7 @@
 import re
 import time
 import json
+import base64
 import logging
 from datetime import datetime, timedelta
 from typing import Dict, Any, Tuple, Optional
@@ -281,23 +282,52 @@ async def parse_with_groq(text: str) -> Optional[VoiceParseData]:
         logger.warning(f"Groq intent parsing failed or timed out ({e}), falling back to regex: {e}")
         return None
 
+async def transcribe_with_groq_whisper(audio_bytes: bytes, filename: str = "audio.webm") -> Optional[str]:
+    """Transcribe real spoken audio into text using Groq Whisper-large-v3-turbo."""
+    if not settings.GROQ_API_KEY:
+        return None
+    try:
+        from groq import AsyncGroq
+        client = AsyncGroq(api_key=settings.GROQ_API_KEY)
+        transcription = await client.audio.transcriptions.create(
+            file=(filename, audio_bytes),
+            model="whisper-large-v3-turbo",
+            response_format="json"
+        )
+        result_text = transcription.text.strip() if hasattr(transcription, "text") else str(transcription).strip()
+        logger.info(f"Groq Whisper successfully transcribed: {result_text}")
+        return result_text
+    except Exception as e:
+        logger.error(f"Groq Whisper transcription error: {e}")
+        return None
+
 async def parse_voice_command(
     transcript_text: Optional[str] = None,
     audio_base64: Optional[str] = None,
+    audio_bytes: Optional[bytes] = None,
+    filename: str = "recording.webm",
     language: str = "hi"
 ) -> VoiceParseResponse:
     start_time = time.perf_counter()
 
-    # If audio is provided but no transcript, provide realistic speech-to-text fallback
-    if audio_base64 and not transcript_text:
-        # Placeholder or mocked ASR decoding for demo
-        transcript_text = "Customer bill 650, 400 UPI now, 250 udhari for Monday, Ramesh 9876543210"
+    if audio_base64 and not audio_bytes:
+        try:
+            if "," in audio_base64:
+                audio_base64 = audio_base64.split(",", 1)[1]
+            audio_bytes = base64.b64decode(audio_base64)
+        except Exception as e:
+            logger.warning(f"Failed to decode audio base64: {e}")
 
-    text = transcript_text or ""
+    if audio_bytes and not transcript_text:
+        whisper_text = await transcribe_with_groq_whisper(audio_bytes, filename=filename)
+        if whisper_text:
+            transcript_text = whisper_text
+
+    text = (transcript_text or "").strip()
     data = None
-    if settings.GROQ_API_KEY:
+    if settings.GROQ_API_KEY and text:
         data = await parse_with_groq(text)
-    if not data:
+    if not data and text:
         data = parse_voice_text(text)
 
     duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
@@ -306,5 +336,14 @@ async def parse_voice_command(
         success=True,
         transcript=text,
         latency_ms=duration_ms,
-        data=data
+        data=data or VoiceParseData(
+            total_bill=0.0,
+            upi_amount=0.0,
+            udhari_amount=0.0,
+            cash_amount=0.0,
+            due_date=None,
+            customer_name=None,
+            customer_phone=None,
+            items=[]
+        )
     )

@@ -93,6 +93,23 @@ export function subscribeToEvents(onEvent: (event: { event_type: string; data?: 
 }
 
 // 1. Voice Intent Parsing
+export async function transcribeAudioRecording(audioBlob: Blob, lang = 'hi'): Promise<VoiceParseResponse> {
+  const formData = new FormData();
+  formData.append('file', audioBlob, 'recording.webm');
+  formData.append('language', lang);
+
+  const res = await fetch(`${API_BASE}/api/voice/transcribe-audio`, {
+    method: 'POST',
+    body: formData,
+  });
+
+  if (!res.ok) {
+    throw new Error('Audio transcription failed');
+  }
+
+  return await res.json();
+}
+
 export async function parseVoiceCommand(transcript: string, lang = 'hi'): Promise<VoiceParseResponse> {
   const startTime = performance.now();
   try {

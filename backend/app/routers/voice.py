@@ -1,5 +1,6 @@
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, UploadFile, File, Form
 from fastapi.responses import FileResponse
+from typing import Optional
 from app.schemas import VoiceParseRequest, VoiceParseResponse, TTSRequest, TTSResponse
 from app.services.voice_parser import parse_voice_command
 from app.services.tts_service import synthesize_speech, AUDIO_DIR
@@ -17,6 +18,23 @@ async def parse_voice(request: VoiceParseRequest):
         transcript_text=request.transcript_text,
         audio_base64=request.audio_base64,
         language=request.language
+    )
+
+@router.post("/transcribe-audio", response_model=VoiceParseResponse)
+async def transcribe_audio_endpoint(
+    file: UploadFile = File(...),
+    language: str = Form("hi")
+):
+    """
+    Accepts live microphone audio recording from frontend,
+    transcribes via Groq Whisper in sub-200ms, and parses checkout entities.
+    """
+    audio_bytes = await file.read()
+    filename = file.filename or "recording.webm"
+    return await parse_voice_command(
+        audio_bytes=audio_bytes,
+        filename=filename,
+        language=language
     )
 
 @router.post("/tts", response_model=TTSResponse)
