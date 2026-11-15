@@ -9,27 +9,32 @@ interface TopNavbarProps {
 
 export const TopNavbar: React.FC<TopNavbarProps> = ({ backendConnected }) => {
   return (
-    <header className="sticky top-0 z-40 bg-[#fcfcfc]/90 backdrop-blur-md border-b border-[#e6e6e6]">
-      <div className="max-w-4xl mx-auto px-6 h-16 flex items-center justify-between">
+    <header className="sticky top-0 z-40 bg-white/85 backdrop-blur-md border-b border-[#e5e7eb]">
+      <div className="max-w-6xl mx-auto px-6 h-14 flex items-center justify-between">
         {/* Brand */}
-        <div className="flex items-center gap-3">
-          <div className="w-8 h-8 rounded-full bg-[#3a3f5c] flex items-center justify-center text-white shadow-xs">
-            <Radio className="w-4 h-4" />
+        <div className="flex items-center gap-2.5">
+          <div className="w-7 h-7 rounded-full bg-[#0071e3] flex items-center justify-center text-white shadow-xs">
+            <Radio className="w-3.5 h-3.5" />
           </div>
-          <span className="font-medium text-lg text-[#3d3d3d] tracking-tight">Vani</span>
+          <div className="flex items-baseline gap-2">
+            <span className="font-semibold text-base text-[#1d1d1f] tracking-tight">Vani</span>
+            <span className="hidden sm:inline text-xs text-[#86868b] font-normal">
+              Autonomous Counter &amp; WhatsApp Agent
+            </span>
+          </div>
         </div>
 
         {/* Status */}
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-3">
           {backendConnected ? (
-            <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-[#0e9f6e]/10 border border-[#0e9f6e]/20">
-              <span className="w-2 h-2 rounded-full bg-[#0e9f6e]" />
-              <span className="text-xs text-[#0e9f6e] font-medium">Online</span>
+            <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-[#f5f5f7] border border-[#e5e7eb]">
+              <span className="w-2 h-2 rounded-full bg-[#34c759]" />
+              <span className="text-xs text-[#1d1d1f] font-medium">Terminal Online</span>
             </div>
           ) : (
-            <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-amber-50 border border-amber-200">
+            <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-amber-50 border border-amber-200">
               <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
-              <span className="text-xs text-amber-600 font-medium">Connecting...</span>
+              <span className="text-xs text-amber-700 font-medium">Connecting...</span>
             </div>
           )}
         </div>
