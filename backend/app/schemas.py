@@ -28,7 +28,7 @@ class VoiceParseResponse(BaseModel):
 
 class CreateInvoiceRequest(BaseModel):
     total_bill: float = Field(gt=0)
-    upi_due: float = Field(gt=0)
+    upi_due: float = Field(default=0.0, ge=0)
     udhari_amount: float = Field(default=0.0, ge=0)
     cash_received: float = 0.0
     customer_name: Optional[str] = None

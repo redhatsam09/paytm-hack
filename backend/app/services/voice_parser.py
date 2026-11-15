@@ -4,6 +4,7 @@ import json
 import base64
 import logging
 import httpx
+import mimetypes
 from datetime import datetime, timedelta
 from typing import Dict, Any, Tuple, Optional
 from app.schemas import VoiceParseData, VoiceParseResponse
@@ -244,9 +245,16 @@ async def parse_with_groq(text: str) -> Optional[VoiceParseData]:
         
         today_str = datetime.now().strftime("%Y-%m-%d (%A)")
         system_prompt = (
-            f"You are an ultra-fast entity parser for Indian Kirana store checkouts.\n"
+            f"You are a careful speech-to-checkout parser for an Indian kirana store.\n"
             f"Today's date is {today_str}.\n"
-            f"Extract checkout entities from user speech (Hindi, Hinglish, Tamil, Telugu, English) into JSON.\n"
+            f"The transcript may be Hindi, Hinglish, Tamil, Telugu, or English and may contain speech-recognition errors.\n"
+            f"Extract only details supported by the transcript. Never invent a customer name, phone number, amount, item, or payment method.\n"
+            f"Treat phone digits as a phone number, never as a bill amount. Amounts next to 'UPI' are upi_amount; amounts next to 'cash/rokkad' are cash_amount; amounts next to 'udhari/credit/khata/baaki' are udhari_amount.\n"
+            f"Use an explicitly stated bill/total amount for total_bill. If it is omitted but payment parts are stated, total_bill is their sum. If a split is incomplete but the speaker explicitly says the remainder is udhari/credit, calculate the remainder from the total. Do not assume a remaining balance is credit without that cue.\n"
+            f"Checkout default: if speech gives a customer and bill amount but no payment method, treat the full amount as UPI. If the speaker says pending/udhari/credit/khata/baaki and gives no split, treat the full amount as store credit. If they say cash but give no split, treat the full amount as cash.\n"
+            f"Understand number words (for example, 'chhe sau pachaas' = 650, 'dhai sau' = 250). Resolve relative due dates from today's date.\n"
+            f"Example: 'Rahul ka bill chhe sau pachaas, char sau UPI, dhai sau udhari somvaar ko' means Rahul, total 650, UPI 400, credit 250, due next Monday.\n"
+            f"If a field is not stated or safely derivable, use 0 for amounts and null for text/date.\n"
             f"Output strictly valid JSON with these keys:\n"
             f'{{"total_bill": float, "upi_amount": float, "udhari_amount": float, "cash_amount": float, "due_date": string or null (format YYYY-MM-DD), "customer_name": string or null, "customer_phone": string or null (10-digit number), "items": list of strings}}'
         )
@@ -260,17 +268,22 @@ async def parse_with_groq(text: str) -> Optional[VoiceParseData]:
             response_format={"type": "json_object"},
             temperature=0.0,
             max_tokens=256,
-            timeout=2.0
+            timeout=8.0
         )
         content = completion.choices[0].message.content
         if content:
             raw = json.loads(content)
             udhari = float(raw.get("udhari_amount") or 0.0)
+            upi = float(raw.get("upi_amount") or 0.0)
+            cash = float(raw.get("cash_amount") or 0.0)
+            total = float(raw.get("total_bill") or 0.0)
+            if min(total, upi, udhari, cash) < 0:
+                raise ValueError("Parser returned a negative amount")
             data = VoiceParseData(
-                total_bill=float(raw.get("total_bill") or 0.0),
-                upi_amount=float(raw.get("upi_amount") or 0.0),
+                total_bill=total,
+                upi_amount=upi,
                 udhari_amount=udhari,
-                cash_amount=float(raw.get("cash_amount") or 0.0),
+                cash_amount=cash,
                 due_date=raw.get("due_date") or (calculate_due_date(text) if udhari > 0 else None),
                 customer_name=raw.get("customer_name") or extract_customer_name(text),
                 customer_phone=raw.get("customer_phone") or extract_phone_number(text),
@@ -278,6 +291,14 @@ async def parse_with_groq(text: str) -> Optional[VoiceParseData]:
             )
             if data.total_bill == 0.0 and (data.upi_amount > 0 or data.udhari_amount > 0):
                 data.total_bill = round(data.upi_amount + data.udhari_amount + data.cash_amount, 2)
+            if data.total_bill > 0 and data.upi_amount + data.udhari_amount + data.cash_amount == 0:
+                lowered = text.lower()
+                if re.search(r"\b(pending|udhari|credit|khata|baaki|baki)\b|उधार|बाकी", lowered):
+                    data.udhari_amount = data.total_bill
+                elif re.search(r"\b(cash|rokkad)\b|नकद|कैश", lowered):
+                    data.cash_amount = data.total_bill
+                else:
+                    data.upi_amount = data.total_bill
             return data
     except Exception as e:
         logger.warning(f"Groq intent parsing failed or timed out ({e}), falling back to regex: {e}")
@@ -288,18 +309,24 @@ async def transcribe_with_sarvam(audio_bytes: bytes, filename: str = "recording.
     if not settings.SARVAM_API_KEY:
         return None
     try:
+        mime_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
         async with httpx.AsyncClient(timeout=30) as client:
             response = await client.post(
                 "https://api.sarvam.ai/speech-to-text",
                 headers={"api-subscription-key": settings.SARVAM_API_KEY},
-                data={"model": "saaras:v4", "mode": "transcribe", "language_code": "unknown"},
-                files={"file": (filename, audio_bytes, "audio/webm")},
+                data={
+                    "model": "saaras:v4",
+                    "mode": "transcribe",
+                    "language_code": "unknown",
+                    "keyterms": json.dumps(["Paytm", "UPI", "udhari", "khata", "credit", "cash", "rupees"]),
+                },
+                files={"file": (filename, audio_bytes, mime_type)},
             )
         response.raise_for_status()
         transcript = response.json().get("transcript", "").strip()
         return transcript or None
     except Exception as e:
-        logger.warning("Sarvam speech transcription failed (%s)", type(e).__name__)
+        logger.warning("Sarvam speech transcription failed (%s): %s", type(e).__name__, str(e)[:300])
         return None
 
 

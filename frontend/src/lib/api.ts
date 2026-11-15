@@ -9,49 +9,8 @@ import {
 
 const API_BASE = typeof window !== 'undefined' ? '' : (process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000');
 
-// In-memory mock store for offline / fallback demonstration
-const mockState = {
-  activeInvoice: null as InvoiceData | null,
-  udhariList: [
-    {
-      id: 'udh-001',
-      transaction_id: 'INV-2026-001',
-      customer_name: 'Ramesh Kumar',
-      customer_phone: '9876543210',
-      amount_due: 250,
-      due_date: '2026-11-17',
-      status: 'UNPAID' as const,
-      paytm_payment_link: 'https://p.paytm.me/pay?id=udh-001&am=250.00',
-      payment_link_id: 'PLINK-9821',
-      created_at: new Date(Date.now() - 3600000).toISOString(),
-    },
-    {
-      id: 'udh-002',
-      transaction_id: 'INV-2026-000',
-      customer_name: 'Suresh Verma',
-      customer_phone: '9811223344',
-      amount_due: 350,
-      due_date: '2026-11-20',
-      status: 'REMINDER_SENT' as const,
-      paytm_payment_link: 'https://p.paytm.me/pay?id=udh-002&am=350.00',
-      payment_link_id: 'PLINK-7734',
-      created_at: new Date(Date.now() - 86400000).toISOString(),
-    },
-    {
-      id: 'udh-003',
-      transaction_id: 'INV-2026-OLD',
-      customer_name: 'Anita Sharma',
-      customer_phone: '9988776655',
-      amount_due: 180,
-      due_date: '2026-11-10',
-      status: 'SETTLED' as const,
-      paytm_payment_link: 'https://p.paytm.me/pay?id=udh-003&am=180.00',
-      payment_link_id: 'PLINK-5512',
-      created_at: new Date(Date.now() - 172800000).toISOString(),
-      settled_at: new Date(Date.now() - 86400000).toISOString(),
-    },
-  ] as UdhariItem[],
-};
+// Invoice reference for compatibility webhook helpers only.
+const mockState = { activeInvoice: null as InvoiceData | null };
 
 // Subscribe to real-time Server-Sent Events (SSE)
 export function subscribeToEvents(onEvent: (event: { event_type: string; data?: unknown }) => void): () => void {
@@ -88,20 +47,35 @@ export function subscribeToEvents(onEvent: (event: { event_type: string; data?: 
 
 // 1. Voice Intent Parsing
 export async function transcribeAudioRecording(audioBlob: Blob, lang = 'hi'): Promise<VoiceParseResponse> {
+  if (audioBlob.size < 100) throw new Error('The recording was empty. Hold the microphone button while speaking, then release it.');
   const formData = new FormData();
-  formData.append('file', audioBlob, 'recording.webm');
+  const mimeType = audioBlob.type.split(';')[0].toLowerCase();
+  const extensionByMime: Record<string, string> = {
+    'audio/webm': 'webm',
+    'audio/mp4': 'm4a',
+    'audio/aac': 'aac',
+    'audio/ogg': 'ogg',
+    'audio/wav': 'wav',
+    'audio/mpeg': 'mp3',
+  };
+  const extension = extensionByMime[mimeType] || 'webm';
+  formData.append('file', audioBlob, `counter-recording.${extension}`);
   formData.append('language', lang);
 
   const res = await fetch(`${API_BASE}/api/voice/transcribe-audio`, {
     method: 'POST',
     body: formData,
+    signal: AbortSignal.timeout(45_000),
   });
 
   if (!res.ok) {
-    throw new Error('Audio transcription failed');
+    const error = await res.json().catch(() => null);
+    throw new Error(error?.detail || `Audio transcription failed (${res.status})`);
   }
 
-  return await res.json();
+  const result = await res.json() as VoiceParseResponse;
+  if (!result.transcript?.trim()) throw new Error('No speech was detected. Try speaking closer to the microphone in a quiet place.');
+  return result;
 }
 
 export async function parseVoiceCommand(transcript: string, lang = 'hi'): Promise<VoiceParseResponse> {
@@ -276,18 +250,10 @@ export async function checkPaytmPaymentStatus(invoiceId: string): Promise<{statu
 
 // 4. Udhari Ledger APIs
 export async function getUdhariList(): Promise<UdhariItem[]> {
-  try {
-    const res = await fetch(`${API_BASE}/api/udhari/list`, {
-      signal: AbortSignal.timeout(2000),
-    });
-    if (res.ok) {
-      const data = await res.json();
-      return Array.isArray(data) ? data : data.items || mockState.udhariList;
-    }
-  } catch {
-    // Backend unreachable, fallback
-  }
-  return [...mockState.udhariList];
+  const res = await fetch(`${API_BASE}/api/udhari/list`, { signal: AbortSignal.timeout(5000) });
+  if (!res.ok) throw new Error((await res.json().catch(() => null))?.detail || 'Could not load the store credit ledger');
+  const data = await res.json();
+  return Array.isArray(data) ? data : data.items || [];
 }
 
 export async function sendUdhariReminder(udhariId: string): Promise<{ success: boolean; message: string }> {
@@ -301,38 +267,16 @@ export async function sendUdhariReminder(udhariId: string): Promise<{ success: b
   return await res.json();
 }
 
-export async function reconcileUdhariPayment(udhariId: string, amount: number): Promise<{ success: boolean; message: string }> {
-  try {
-    const res = await fetch(`${API_BASE}/api/udhari/reconcile`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        udhari_id: udhariId,
-        amount_paid: amount,
-        utr: `PAYTMUDH${Math.floor(100000 + Math.random() * 900000)}`,
-      }),
-      signal: AbortSignal.timeout(2000),
-    });
-    if (res.ok) return await res.json();
-  } catch {
-    // Fallback
-  }
-
-  const item = mockState.udhariList.find(i => i.id === udhariId);
-  if (!item) {
-    return { success: false, message: 'Udhari record not found' };
-  }
-  if (item.status === 'SETTLED') {
-    return { success: false, message: 'Udhari record is already settled' };
-  }
-  if (Math.abs(item.amount_due - amount) > 0.005) {
-    return { success: false, message: `Settlement must match ₹${item.amount_due.toFixed(2)}` };
-  }
-  if (item) {
-    item.status = 'SETTLED';
-    item.settled_at = new Date().toISOString();
-  }
-  return { success: true, message: `Payment of ₹${amount} reconciled. Udhari settled!` };
+export async function reconcileUdhariPayment(udhariId: string, amount: number, utr = ''): Promise<{ success: boolean; message: string }> {
+  if (!utr.trim()) throw new Error('A verified transaction reference is required before reconciling store credit.');
+  const res = await fetch(`${API_BASE}/api/udhari/reconcile`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ udhari_id: udhariId, amount_paid: amount, utr }),
+    signal: AbortSignal.timeout(5000),
+  });
+  if (!res.ok) throw new Error((await res.json().catch(() => null))?.detail || 'Could not verify this store credit payment');
+  return await res.json();
 }
 
 export async function replayDemoUdhariSettlement(udhariId: string): Promise<{ success: boolean; message: string }> {
@@ -364,15 +308,7 @@ export async function analyzeDistributorInvoice(file?: File | null): Promise<Inv
     if (!res.ok) throw new Error((await res.json().catch(() => null))?.detail || 'Uploaded invoice could not be analyzed');
     return await res.json();
   }
-
-  const res = await fetch(`${API_BASE}/api/restock/analyze-invoice`, {
-    method: 'POST',
-    signal: AbortSignal.timeout(10_000),
-  }).catch((error: unknown) => {
-    throw new Error(error instanceof Error ? `Sample analysis unavailable: ${error.message}` : 'Sample analysis unavailable');
-  });
-  if (!res.ok) throw new Error((await res.json().catch(() => null))?.detail || 'Sample invoice fixture could not be analyzed');
-  return await res.json();
+  throw new Error('Choose a distributor invoice photo, PDF, or CSV before starting analysis.');
 }
 
 export async function sendPurchaseOrder(payload: {

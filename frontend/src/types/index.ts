@@ -31,7 +31,7 @@ export interface InvoiceData {
   expires_in: number;
   status: 'PENDING_PAYMENT' | 'COMPLETED' | 'SHORT_PAYMENT' | 'EXPIRED';
   udhari_id?: string;
-  payment_mode?: 'DEMO' | 'PAYTM_DYNAMIC_QR';
+  payment_mode?: 'DEMO' | 'PAYTM_DYNAMIC_QR' | 'CREDIT_ONLY';
 }
 
 export interface WebhookResponse {

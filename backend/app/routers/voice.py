@@ -4,6 +4,7 @@ from typing import Optional
 from app.schemas import VoiceParseRequest, VoiceParseResponse, TTSRequest, TTSResponse
 from app.services.voice_parser import parse_voice_command
 from app.services.tts_service import synthesize_speech, AUDIO_DIR
+from app.config import settings
 
 router = APIRouter(prefix="/voice", tags=["Voice & Intent"])
 
@@ -30,12 +31,19 @@ async def transcribe_audio_endpoint(
     configured (Groq Whisper fallback), then parses checkout entities.
     """
     audio_bytes = await file.read()
+    if not audio_bytes:
+        raise HTTPException(status_code=400, detail="The microphone recording was empty. Please record again.")
+    if not settings.SARVAM_API_KEY and not settings.GROQ_API_KEY:
+        raise HTTPException(status_code=503, detail="Configure SARVAM_API_KEY or GROQ_API_KEY to transcribe microphone audio.")
     filename = file.filename or "recording.webm"
-    return await parse_voice_command(
+    result = await parse_voice_command(
         audio_bytes=audio_bytes,
         filename=filename,
         language=language
     )
+    if not result.transcript.strip():
+        raise HTTPException(status_code=502, detail="Speech transcription failed. Try again or enter the bill by typing.")
+    return result
 
 @router.post("/tts", response_model=TTSResponse)
 async def generate_tts(request: TTSRequest):

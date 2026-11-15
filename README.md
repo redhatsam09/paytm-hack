@@ -6,15 +6,15 @@ A voice-first counter workflow concept for small retailers. The web app combines
 
 ### 1. Voice checkout
 
-The merchant can speak or type a bill. The parser extracts the customer, total, UPI amount, store-credit amount, contact number, and promised date. The merchant reviews the split before creating a backend invoice and credit-ledger entry.
+The merchant can speak or type a bill. The parser extracts the customer, total, UPI amount, store-credit amount, contact number, and promised date. When no payment type is spoken, the full bill defaults to UPI; phrases such as “pending” assign the full bill to store credit. The merchant can review and edit the split before creating the invoice. Cash-only and credit-only invoices are supported.
 
 ### 2. Payment QR and mismatch guard
 
-With Paytm Dynamic QR merchant credentials configured, the backend requests an amount-locked QR and checks Paytm’s transaction status. Only gateway results drive the match or shortfall announcement. Without those credentials, the UI does not show a placeholder QR and explains that payment verification is unavailable.
+With Paytm Dynamic QR merchant credentials configured, the backend requests an amount-locked QR and checks Paytm’s transaction status. Only gateway results drive the match or shortfall announcement. Without those credentials, the checkout displays a clearly marked demo QR for interface review; it is not payable and cannot verify settlement. A credit-only invoice has no QR because there is no UPI amount due.
 
 ### 3. Store-credit recovery
 
-Credit and due-date details come from the invoice. The merchant can prepare a WhatsApp reminder for review and manually press Send. The current UI does not send messages automatically or verify payments made through a credit link.
+Credit and due-date details come from the invoice. Credit Recovery also loads outstanding accounts from the backend ledger. The merchant can prepare a WhatsApp reminder for review and manually press Send. The current UI does not send messages automatically or verify payments made through a credit link.
 
 ### 4. Distributor restock audit
 
@@ -25,7 +25,7 @@ Upload a distributor invoice photo/PDF for Gemini Vision OCR, or a CSV with `sku
 - **Sarvam** handles speech transcription when `SARVAM_API_KEY` is configured.
 - **Groq** can parse voice intent when `GROQ_API_KEY` is configured; typed input remains available.
 - **Gemini Vision** analyzes uploaded invoice images/PDFs when `GEMINI_API_KEY` is configured.
-- **Paytm Dynamic QR and settlement verification** require Paytm-issued merchant credentials. An API key alone is not sufficient.
+- **Paytm Dynamic QR and settlement verification** require Paytm-issued merchant credentials. Without them, the UI shows a non-payable demo QR. An API key alone is not sufficient.
 - **WhatsApp** actions open a message draft for merchant review. The current UI does not call WhatsApp Cloud API to send it.
 
 No API secrets belong in frontend source or Git. Put local credentials in `backend/.env`, which is ignored by Git.
@@ -87,6 +87,7 @@ These checks exercise local API behavior; they do not prove that a live Paytm pa
 ## Repository layout
 
 - `backend/app/`: FastAPI routes, database models, and speech, payment, and invoice-analysis services.
-- `frontend/src/components/CheckoutTerminal.tsx`: active four-stage merchant workflow and Soundbox-style display.
+- `frontend/src/components/CheckoutTerminal.tsx`: active checkout, credit-ledger, and restock-audit sections with the Soundbox-style display.
+- `frontend/src/components/QRCodeDisplay.tsx`: scannable QR rendering without a center overlay that could obscure QR modules.
 - `frontend/src/lib/api.ts`: frontend API client.
 - `tests/`: integration checks and invoice fixtures.

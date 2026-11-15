@@ -41,8 +41,8 @@ async def create_invoice(request: CreateInvoiceRequest, db: AsyncSession = Depen
 
     # Generate collision-free unique invoice ID
     invoice_id = f"INV-{uuid.uuid4().hex[:6].upper()}"
-    payment_mode = "DEMO"
-    if paytm_live_ready():
+    payment_mode = "CREDIT_ONLY" if request.upi_due == 0 else "DEMO"
+    if request.upi_due > 0 and paytm_live_ready():
         if create_dynamic_qr is None:
             raise HTTPException(status_code=503, detail="Install backend payment dependencies to use Paytm Dynamic QR")
         try:
@@ -55,14 +55,16 @@ async def create_invoice(request: CreateInvoiceRequest, db: AsyncSession = Depen
             payment_mode = "PAYTM_DYNAMIC_QR"
         except Exception as exc:
             raise HTTPException(status_code=502, detail=f"Paytm QR creation failed: {exc}") from exc
-    else:
+    elif request.upi_due > 0:
         upi_string = generate_paytm_upi_string(
             amount=request.upi_due,
             invoice_id=invoice_id,
             merchant_vpa="demo-not-a-real-vpa.invalid",
             merchant_name="DEMO ONLY - NO PAYMENT"
         )
-    qr_base64 = generate_qr_base64(upi_string)
+    else:
+        upi_string = ""
+    qr_base64 = generate_qr_base64(upi_string) if upi_string else ""
 
     # Save transaction record in DB
     txn = Transaction(

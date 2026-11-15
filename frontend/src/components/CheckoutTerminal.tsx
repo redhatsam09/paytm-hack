@@ -25,6 +25,7 @@ import {
   WebhookResponse,
   InvoiceAnalysisResponse,
   RestockOrderResponse,
+  UdhariItem,
 } from '@/types';
 import {
   parseVoiceCommand,
@@ -33,10 +34,11 @@ import {
   checkPaytmPaymentStatus,
   analyzeDistributorInvoice,
   sendPurchaseOrder,
+  getUdhariList,
 } from '@/lib/api';
 import { playPaytmChime, playAlertSiren, speakAnnouncement } from '@/lib/audio';
 
-type TerminalStep = 1 | 2 | 3 | 4;
+type TerminalStep = 1 | 3 | 4;
 
 const formatDueDate = (dateValue?: string) => {
   if (!dateValue) return 'Not specified';
@@ -56,10 +58,13 @@ export const CheckoutTerminal: React.FC = () => {
   const [isProcessingVoice, setIsProcessingVoice] = useState<boolean>(false);
   const [voiceStatusText, setVoiceStatusText] = useState<string>('');
   const [parsedData, setParsedData] = useState<VoiceParseData | null>(null);
+  const [shouldScrollToBillReview, setShouldScrollToBillReview] = useState(false);
 
   // Audio Recording Refs for real microphone capture
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
+  const recordingTimeoutRef = useRef<number | null>(null);
+  const parsedBillRef = useRef<HTMLDivElement | null>(null);
 
   // Step 2: Dynamic QR & Payment Verification
   const [activeInvoice, setActiveInvoice] = useState<InvoiceData | null>(null);
@@ -72,6 +77,9 @@ export const CheckoutTerminal: React.FC = () => {
 
   // Step 3: Credit Recovery
   const [reminderSent, setReminderSent] = useState<boolean>(false);
+  const [creditEntries, setCreditEntries] = useState<UdhariItem[]>([]);
+  const [isLoadingCredits, setIsLoadingCredits] = useState<boolean>(false);
+  const [creditLoadError, setCreditLoadError] = useState<string>('');
 
   // Step 4: Restock & Price Audit
   const [billFile, setBillFile] = useState<File | null>(null);
@@ -94,9 +102,26 @@ export const CheckoutTerminal: React.FC = () => {
     return () => URL.revokeObjectURL(previewUrl);
   }, [billFile]);
 
-  // Countdown timer for Step 2
   useEffect(() => {
-    if (currentStep !== 2 || activeInvoice?.payment_mode !== 'PAYTM_DYNAMIC_QR' || paymentResult?.status === 'SUCCESS') return;
+    if (currentStep !== 3 || activeInvoice?.udhari_id) return;
+    setIsLoadingCredits(true);
+    setCreditLoadError('');
+    getUdhariList()
+      .then(setCreditEntries)
+      .catch((error) => setCreditLoadError(error instanceof Error ? error.message : 'Could not load store credit records.'))
+      .finally(() => setIsLoadingCredits(false));
+  }, [currentStep, activeInvoice?.udhari_id]);
+
+  useEffect(() => {
+    if (shouldScrollToBillReview && !activeInvoice) {
+      parsedBillRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      setShouldScrollToBillReview(false);
+    }
+  }, [shouldScrollToBillReview, activeInvoice]);
+
+  // Countdown for the inline checkout QR
+  useEffect(() => {
+    if (currentStep !== 1 || activeInvoice?.payment_mode !== 'PAYTM_DYNAMIC_QR' || paymentResult?.status === 'SUCCESS') return;
 
     const timer = setInterval(() => {
       setSecondsRemaining((prev) => Math.max(0, prev - 1));
@@ -108,6 +133,7 @@ export const CheckoutTerminal: React.FC = () => {
   // Execute voice or typed command
   const executeCommand = async (text: string) => {
     if (!text.trim()) return;
+    setTranscript(text);
     setActiveInvoice(null);
     setParsedData(null);
     setReminderSent(false);
@@ -119,10 +145,14 @@ export const CheckoutTerminal: React.FC = () => {
     setPaymentResult(null);
     try {
       const res = await parseVoiceCommand(text);
-      setTranscript(res.transcript || text);
+      setTranscript(text.trim());
       if (res.data && res.data.total_bill > 0 && (res.data.upi_amount + res.data.udhari_amount + res.data.cash_amount) > 0) {
         setParsedData(res.data);
-        setVoiceStatusText(`Parsed ${res.data.customer_name || 'customer'}’s ₹${res.data.total_bill.toFixed(2)} bill. Review the details, then lock the QR.`);
+        setShouldScrollToBillReview(true);
+        const hasPaymentCue = /(upi|cash|udhari|credit|khata|baaki|pending|paid|नकद|उधार|बाकी|यूपीआई)/i.test(text);
+        setVoiceStatusText(hasPaymentCue
+          ? `Parsed ${res.data.customer_name || 'customer'}’s ₹${res.data.total_bill.toFixed(2)} bill. Review the split, then create the invoice.`
+          : `Parsed ${res.data.customer_name || 'customer'}’s ₹${res.data.total_bill.toFixed(2)} bill. No payment type was spoken, so the full amount is set to UPI; review before creating the invoice.`);
       } else {
         setParsedData(null);
         setVoiceStatusText(`I heard “${res.transcript || text}” but couldn't identify a complete bill split. Edit the command and try again.`);
@@ -139,6 +169,7 @@ export const CheckoutTerminal: React.FC = () => {
   const handleToggleMic = async () => {
     if (isListening) {
       setIsListening(false);
+      if (recordingTimeoutRef.current) window.clearTimeout(recordingTimeoutRef.current);
       if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
         mediaRecorderRef.current.stop();
       }
@@ -150,11 +181,17 @@ export const CheckoutTerminal: React.FC = () => {
     setPaymentResult(null);
     setPaymentStatusMessage('');
     setReminderSent(false);
+    setTranscript('');
+    setVoiceStatusText('Requesting microphone access…');
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       audioChunksRef.current = [];
-      const mediaRecorder = new MediaRecorder(stream);
+      const preferredMimeTypes = ['audio/webm;codecs=opus', 'audio/mp4', 'audio/webm', 'audio/ogg;codecs=opus'];
+      const supportedMimeType = preferredMimeTypes.find((mimeType) => MediaRecorder.isTypeSupported(mimeType));
+      const mediaRecorder = supportedMimeType
+        ? new MediaRecorder(stream, { mimeType: supportedMimeType })
+        : new MediaRecorder(stream);
       mediaRecorderRef.current = mediaRecorder;
 
       mediaRecorder.ondataavailable = (event) => {
@@ -163,38 +200,55 @@ export const CheckoutTerminal: React.FC = () => {
 
       mediaRecorder.onstop = async () => {
         stream.getTracks().forEach((track) => track.stop());
-        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+        if (recordingTimeoutRef.current) window.clearTimeout(recordingTimeoutRef.current);
+        const audioBlob = new Blob(audioChunksRef.current, { type: mediaRecorder.mimeType || audioChunksRef.current[0]?.type });
 
         if (audioBlob.size > 100) {
           setIsProcessingVoice(true);
-          setVoiceStatusText('Vani is transcribing your recording…');
+          setVoiceStatusText('Uploading your recording for speech recognition…');
           try {
             const res = await transcribeAudioRecording(audioBlob);
-            if (res.transcript) {
-              setTranscript(res.transcript);
-            }
+            const spokenText = res.transcript.trim();
+            setTranscript(spokenText);
             if (res.data && res.data.total_bill > 0 && (res.data.upi_amount + res.data.udhari_amount + res.data.cash_amount) > 0) {
               setParsedData(res.data);
-              setVoiceStatusText(`Parsed ${res.data.customer_name || 'customer'}’s ₹${res.data.total_bill.toFixed(2)} bill. Review the details, then lock the QR.`);
-            } else if (res.transcript) {
+              setShouldScrollToBillReview(true);
+              const hasPaymentCue = /(upi|cash|udhari|credit|khata|baaki|pending|paid|नकद|उधार|बाकी|यूपीआई)/i.test(spokenText);
+              setVoiceStatusText(hasPaymentCue
+                ? `Heard: “${spokenText}”. Review the extracted amounts and customer details before creating the invoice.`
+                : `Heard: “${spokenText}”. No payment type was spoken, so the full amount is set to UPI; review before creating the invoice.`);
+            } else {
               setParsedData(null);
-              setVoiceStatusText(`I heard “${res.transcript}” but couldn't identify a complete bill split. Edit the command and try again.`);
+              setVoiceStatusText(`Heard: “${spokenText}”. I could not identify a complete bill split. Correct the transcript and submit it to parse again.`);
             }
           } catch (error) {
-            setFlowError(error instanceof Error ? error.message : 'Audio transcription failed');
-            setVoiceStatusText('Could not transcribe the recording. You can type what you said and retry.');
+            const message = error instanceof Error ? error.message : 'Audio transcription failed';
+            setFlowError(message);
+            setVoiceStatusText('Transcription failed. Check the error, then record again or type the bill.');
           } finally {
             setIsProcessingVoice(false);
           }
+        } else {
+          setVoiceStatusText('No clear audio was captured. Hold the microphone button while speaking, then release it.');
         }
       };
 
       mediaRecorder.start(200);
       setIsListening(true);
-      setVoiceStatusText('Listening... Speak customer name, UPI amount, and credit');
-    } catch {
+      setVoiceStatusText('Listening… Speak the customer, bill total, UPI, credit/cash split, and due date. Release to finish (max 20 seconds).');
+      recordingTimeoutRef.current = window.setTimeout(() => {
+        if (mediaRecorder.state === 'recording') {
+          setIsListening(false);
+          setVoiceStatusText('Recording limit reached. Processing your speech…');
+          mediaRecorder.stop();
+        }
+      }, 20_000);
+    } catch (error) {
       setIsListening(false);
-      setVoiceStatusText('Microphone access is blocked. Allow microphone access or enter the bill below.');
+      const message = error instanceof Error && error.name === 'NotAllowedError'
+        ? 'Microphone access is blocked. Allow microphone access or enter the bill below.'
+        : error instanceof Error ? error.message : 'Could not start the microphone.';
+      setVoiceStatusText(message);
     }
   };
 
@@ -206,8 +260,13 @@ export const CheckoutTerminal: React.FC = () => {
       return;
     }
     const splitTotal = parsedData.upi_amount + parsedData.udhari_amount + parsedData.cash_amount;
-    if (parsedData.upi_amount <= 0 || Math.abs(splitTotal - parsedData.total_bill) > 0.01) {
-      setFlowError(`The UPI, credit, and cash split must add up to ₹${parsedData.total_bill.toFixed(2)}, with a positive UPI amount.`);
+    if (Math.abs(splitTotal - parsedData.total_bill) > 0.01) {
+      setFlowError(`UPI, store credit, and cash must add up to ₹${parsedData.total_bill.toFixed(2)}.`);
+      setCurrentStep(1);
+      return;
+    }
+    if (parsedData.upi_amount + parsedData.cash_amount + parsedData.udhari_amount <= 0) {
+      setFlowError('Enter a UPI, cash, or store-credit amount for this bill.');
       setCurrentStep(1);
       return;
     }
@@ -228,6 +287,7 @@ export const CheckoutTerminal: React.FC = () => {
       const invoice = await createCounterInvoice({
         total_bill: total,
         upi_due: upi,
+        cash_received: parsedData.cash_amount,
         udhari_amount: udhari,
         customer_name: name,
         customer_phone: phone,
@@ -240,7 +300,7 @@ export const CheckoutTerminal: React.FC = () => {
       setReminderSent(false);
       setPaymentStatusMessage('');
       setFlowError('');
-      setCurrentStep(2);
+      setCurrentStep(1);
     } catch (err) {
       console.warn('Invoice generation error:', err);
       setFlowError(err instanceof Error ? err.message : 'Could not create this invoice');
@@ -300,7 +360,7 @@ export const CheckoutTerminal: React.FC = () => {
   };
 
   useEffect(() => {
-    if (currentStep !== 2 || activeInvoice?.payment_mode !== 'PAYTM_DYNAMIC_QR') return;
+    if (currentStep !== 1 || activeInvoice?.payment_mode !== 'PAYTM_DYNAMIC_QR') return;
     if (paymentResult?.status === 'SUCCESS' || paymentResult?.status === 'SHORTFALL_ALERT') return;
     const timer = window.setInterval(() => {
       if (!isVerifyingPayment) void handleVerifyPayment();
@@ -333,6 +393,18 @@ export const CheckoutTerminal: React.FC = () => {
 
     setFlowError('');
     setReminderSent(true);
+  };
+
+  const handleOpenLedgerWhatsApp = (entry: UdhariItem) => {
+    const cleanPhone = (entry.customer_phone || '').replace(/\D/g, '');
+    if (cleanPhone.length < 10) {
+      setFlowError(`Add a valid phone number to ${entry.customer_name}’s ledger record before opening WhatsApp.`);
+      return;
+    }
+    const fullPhone = cleanPhone.length === 10 ? `91${cleanPhone}` : cleanPhone;
+    const message = `Dear ${entry.customer_name}, your store credit balance of ₹${entry.amount_due.toFixed(2)} is due on ${formatDueDate(entry.due_date)}. Please contact the store to arrange payment.`;
+    window.open(`https://wa.me/${fullPhone}?text=${encodeURIComponent(message)}`, '_blank', 'noopener,noreferrer');
+    setFlowError('');
   };
 
   // Step 4: Analyze Distributor Invoice
@@ -419,18 +491,12 @@ export const CheckoutTerminal: React.FC = () => {
   const upiDue = activeInvoice?.upi_due ?? parsedData?.upi_amount ?? 0;
   const udhariDue = activeInvoice?.udhari_amount ?? parsedData?.udhari_amount ?? 0;
   const dueDate = formatDueDate(activeInvoice?.due_date || parsedData?.due_date);
+  const reviewedSplit = parsedData ? parsedData.upi_amount + parsedData.udhari_amount + parsedData.cash_amount : 0;
+  const splitMatchesTotal = Boolean(parsedData && Math.abs(reviewedSplit - parsedData.total_bill) <= 0.01);
 
   // Handler for navigation tabs ensuring data availability
   const handleTabClick = (step: TerminalStep) => {
-    if ((step === 2 || step === 3) && !activeInvoice) {
-      setCurrentStep(1);
-      setFlowError('Parse the bill and lock its QR before opening payment or credit recovery.');
-      return;
-    }
-    if (step === 3 && (!activeInvoice?.udhari_id || activeInvoice.udhari_amount <= 0)) {
-      setFlowError('This invoice has no store-credit balance to recover.');
-      return;
-    }
+    if (step === 3) setFlowError('');
     setCurrentStep(step);
   };
 
@@ -444,9 +510,9 @@ export const CheckoutTerminal: React.FC = () => {
               <div className="flex items-center gap-2"><span className="flex h-6 w-6 items-center justify-center rounded-full bg-[#00baf2] text-[10px] font-black text-white">P</span><span className="text-[10px] font-bold tracking-[0.22em] text-slate-200">PAYTM SOUND BOX</span></div>
             </div>
             <div className="rounded-xl border border-cyan-300/20 bg-[#05151b] px-4 py-3 shadow-[inset_0_2px_12px_rgba(0,0,0,0.8)]">
-              <div className="mb-2 text-[9px] uppercase tracking-[0.16em] text-cyan-200/70">{paymentResult?.status === 'SHORTFALL_ALERT' ? 'Payment mismatch' : paymentResult?.status === 'SUCCESS' ? 'Payment matched' : currentStep === 4 ? 'Invoice audit' : currentStep === 3 ? 'Credit recovery' : currentStep === 2 ? 'Payment expected' : 'Counter ready'}</div>
+              <div className="mb-2 text-[9px] uppercase tracking-[0.16em] text-cyan-200/70">{paymentResult?.status === 'SHORTFALL_ALERT' ? 'Payment mismatch' : paymentResult?.status === 'SUCCESS' ? 'Payment matched' : currentStep === 4 ? 'Invoice audit' : currentStep === 3 ? 'Credit recovery' : activeInvoice ? 'Payment expected' : 'Counter ready'}</div>
               <div className={`font-mono text-3xl font-bold tracking-tight ${paymentResult?.status === 'SHORTFALL_ALERT' ? 'text-rose-300' : paymentResult?.status === 'SUCCESS' ? 'text-emerald-300' : 'text-cyan-100'}`}>
-                {currentStep === 4 ? `${billAnalysis?.items.length || 0} LINES` : currentStep === 3 ? `₹${udhariDue.toFixed(2)}` : currentStep === 2 ? `₹${upiDue.toFixed(2)}` : parsedData ? `₹${parsedData.total_bill.toFixed(2)}` : 'READY'}
+                {currentStep === 4 ? `${billAnalysis?.items.length || 0} LINES` : currentStep === 3 ? `₹${udhariDue.toFixed(2)}` : activeInvoice ? `₹${upiDue.toFixed(2)}` : parsedData ? `₹${parsedData.total_bill.toFixed(2)}` : 'READY'}
               </div>
               <div className="mt-1 truncate text-[10px] text-cyan-100/55">{currentStep === 4 ? billAnalysis?.vendor_name || 'Scan supplier delivery bill' : currentStep === 1 && !parsedData ? 'Speak or enter the customer bill' : `${customerName} · ${currentStep === 3 ? 'store credit due' : 'counter transaction'}`}</div>
             </div>
@@ -466,7 +532,7 @@ export const CheckoutTerminal: React.FC = () => {
 
       {/* Apple Light Workflow Step Navigator */}
       <div className="bg-white rounded-2xl p-2 border border-[#e5e7eb] shadow-xs max-w-2xl mx-auto">
-        <div className="grid grid-cols-4 gap-1 text-center">
+        <div className="grid grid-cols-3 gap-1 text-center">
           <button
             type="button"
             onClick={() => handleTabClick(1)}
@@ -476,18 +542,7 @@ export const CheckoutTerminal: React.FC = () => {
                 : 'text-[#86868b] hover:text-[#1d1d1f]'
             }`}
           >
-            1. Voice Checkout
-          </button>
-          <button
-            type="button"
-            onClick={() => handleTabClick(2)}
-            className={`py-2 px-1 rounded-xl text-xs font-medium transition-all cursor-pointer ${
-              currentStep === 2
-                ? 'bg-[#0071e3] text-white shadow-xs'
-                : 'text-[#86868b] hover:text-[#1d1d1f]'
-            }`}
-          >
-            2. Payment QR
+            1. Checkout
           </button>
           <button
             type="button"
@@ -498,7 +553,7 @@ export const CheckoutTerminal: React.FC = () => {
                 : 'text-[#86868b] hover:text-[#1d1d1f]'
             }`}
           >
-            3. Credit Recovery
+            2. Credit Recovery
           </button>
           <button
             type="button"
@@ -509,7 +564,7 @@ export const CheckoutTerminal: React.FC = () => {
                 : 'text-[#86868b] hover:text-[#1d1d1f]'
             }`}
           >
-            4. Restock Audit
+            3. Restock Audit
           </button>
         </div>
       </div>
@@ -528,7 +583,7 @@ export const CheckoutTerminal: React.FC = () => {
         <div className="bg-white rounded-3xl p-8 sm:p-12 border border-[#e5e7eb] shadow-xs space-y-8 animate-in fade-in duration-150">
           <div className="text-center max-w-xl mx-auto">
             <span className="text-xs uppercase tracking-wider font-semibold text-[#0071e3] block">
-              Stage 1 • Voice-to-Dynamic-QR &amp; Split Credit
+              Checkout • Voice, payment, and store credit
             </span>
             <h2 className="text-2xl sm:text-3xl font-semibold text-[#1d1d1f] tracking-tight mt-1">
               Counter Voice Checkout
@@ -557,7 +612,7 @@ export const CheckoutTerminal: React.FC = () => {
               {isListening
                 ? 'Recording your voice... Click again to process'
                 : isProcessingVoice
-                ? 'Transcribing audio with Groq Whisper...'
+                ? 'Recognizing speech and extracting bill details…'
                 : 'Tap microphone to speak customer bill'}
             </span>
 
@@ -578,16 +633,23 @@ export const CheckoutTerminal: React.FC = () => {
           {/* Clean Input Field */}
           <div className="max-w-xl mx-auto space-y-3">
             <form
-              onSubmit={(e) => {
+                onSubmit={(e) => {
                 e.preventDefault();
-                executeCommand(transcript);
+                  const formData = new FormData(e.currentTarget);
+                  const command = String(formData.get('checkoutCommand') || '').trim();
+                  if (command) executeCommand(command);
               }}
               className="relative"
             >
               <input
                 type="text"
+                name="checkoutCommand"
+                aria-label="Customer bill command"
                 value={transcript}
-                onChange={(e) => setTranscript(e.target.value)}
+                onChange={(e) => {
+                  setTranscript(e.target.value);
+                  setParsedData(null);
+                }}
                 placeholder="Speak or type the customer, total, UPI amount, credit amount, and due date"
                 className="w-full h-12 pl-5 pr-12 bg-[#f5f5f7] border border-[#e5e7eb] rounded-full text-sm text-[#1d1d1f] placeholder-[#86868b] focus:outline-none focus:border-[#0071e3] font-normal"
               />
@@ -604,8 +666,8 @@ export const CheckoutTerminal: React.FC = () => {
           </div>
 
           {/* Parsed Bill Card (appears dynamically once command is entered) */}
-          {parsedData && (
-            <div className="pt-6 border-t border-[#e5e7eb] space-y-6 max-w-xl mx-auto animate-in fade-in">
+          {parsedData && !activeInvoice && (
+            <div ref={parsedBillRef} className="pt-6 border-t border-[#e5e7eb] space-y-6 max-w-xl mx-auto animate-in fade-in">
               <div className="flex items-center justify-between pb-2 border-b border-[#f5f5f7]">
                 <div className="flex items-center gap-2">
                   <div className="w-7 h-7 rounded-full bg-[#0071e3]/10 text-[#0071e3] flex items-center justify-center font-bold text-xs">
@@ -634,185 +696,93 @@ export const CheckoutTerminal: React.FC = () => {
                 {parsedData.udhari_amount > 0 && (
                   <div className="text-right">
                     <span className="text-[11px] text-[#86868b] block">Store Credit Promise</span>
-                    <span className="text-sm font-semibold text-amber-700">Due: {dueDate}</span>
+                    <input
+                      aria-label="Store credit due date"
+                      type="date"
+                      value={parsedData.due_date || ''}
+                      onChange={(event) => setParsedData((current) => current ? { ...current, due_date: event.target.value } : current)}
+                      className="mt-1 max-w-full rounded-lg border border-[#e5e7eb] bg-white px-2 py-1 text-xs font-semibold text-amber-800"
+                    />
                   </div>
                 )}
               </div>
 
               {/* Amount Breakdown */}
-              <div className="grid grid-cols-3 gap-3 text-center">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-center">
                 <div className="p-3 bg-[#f5f5f7] rounded-2xl border border-[#e5e7eb]">
                   <span className="text-xs text-[#86868b] block mb-1">Total Bill</span>
-                  <span className="text-lg font-semibold text-[#1d1d1f]">₹{parsedData.total_bill.toFixed(2)}</span>
+                  <div className="flex items-center justify-center gap-1"><span className="text-sm">₹</span><input aria-label="Total bill amount" type="number" min="0" step="0.01" value={parsedData.total_bill} onChange={(event) => setParsedData((current) => current ? { ...current, total_bill: Number(event.target.value) || 0 } : current)} className="w-24 bg-transparent text-center text-lg font-semibold text-[#1d1d1f] focus:outline-none" /></div>
                 </div>
                 <div className="p-3 bg-blue-50/70 rounded-2xl border border-blue-200">
                   <span className="text-xs text-[#0071e3] font-medium block mb-1">UPI Due</span>
-                  <span className="text-lg font-bold text-[#0071e3]">₹{upiDue.toFixed(2)}</span>
+                  <div className="flex items-center justify-center gap-1"><span className="text-sm text-[#0071e3]">₹</span><input aria-label="UPI amount" type="number" min="0" step="0.01" value={parsedData.upi_amount} onChange={(event) => setParsedData((current) => current ? { ...current, upi_amount: Number(event.target.value) || 0 } : current)} className="w-24 bg-transparent text-center text-lg font-bold text-[#0071e3] focus:outline-none" /></div>
                 </div>
                 <div className="p-3 bg-amber-50/70 rounded-2xl border border-amber-200">
                   <span className="text-xs text-amber-800 font-medium block mb-1">Store Credit</span>
-                  <span className="text-lg font-bold text-amber-700">₹{udhariDue.toFixed(2)}</span>
+                  <div className="flex items-center justify-center gap-1"><span className="text-sm text-amber-700">₹</span><input aria-label="Store credit amount" type="number" min="0" step="0.01" value={parsedData.udhari_amount} onChange={(event) => setParsedData((current) => current ? { ...current, udhari_amount: Number(event.target.value) || 0 } : current)} className="w-24 bg-transparent text-center text-lg font-bold text-amber-700 focus:outline-none" /></div>
+                </div>
+                <div className="p-3 bg-emerald-50/70 rounded-2xl border border-emerald-200">
+                  <span className="text-xs text-emerald-800 font-medium block mb-1">Cash</span>
+                  <div className="flex items-center justify-center gap-1"><span className="text-sm text-emerald-700">₹</span><input aria-label="Cash amount" type="number" min="0" step="0.01" value={parsedData.cash_amount} onChange={(event) => setParsedData((current) => current ? { ...current, cash_amount: Number(event.target.value) || 0 } : current)} className="w-24 bg-transparent text-center text-lg font-bold text-emerald-700 focus:outline-none" /></div>
                 </div>
               </div>
+
+              <p className={`text-xs text-center ${splitMatchesTotal ? 'text-emerald-700' : 'text-rose-700'}`} role="status">
+                {splitMatchesTotal
+                  ? `Amounts reconcile: ₹${reviewedSplit.toFixed(2)} allocated against ₹${parsedData.total_bill.toFixed(2)} total.`
+                  : `Amounts do not reconcile: UPI + credit + cash = ₹${reviewedSplit.toFixed(2)}, but total is ₹${parsedData.total_bill.toFixed(2)}. Correct the fields before continuing.`}
+              </p>
 
               {/* Advance CTA */}
               <div className="pt-2 flex justify-end">
                 <button
                   type="button"
                   onClick={handleProceedToQR}
-                  disabled={isGeneratingInvoice || isProcessingVoice}
-                  className="h-11 px-6 rounded-full bg-[#0071e3] hover:bg-[#2997ff] text-white text-sm font-medium flex items-center gap-2 cursor-pointer transition-colors shadow-xs"
+                  disabled={isGeneratingInvoice || isProcessingVoice || !splitMatchesTotal || parsedData.total_bill <= 0 || parsedData.upi_amount + parsedData.cash_amount + parsedData.udhari_amount <= 0 || (parsedData.udhari_amount > 0 && !parsedData.customer_name?.trim())}
+                  className="h-11 px-6 rounded-full bg-[#0071e3] hover:bg-[#2997ff] text-white text-sm font-medium flex items-center gap-2 cursor-pointer transition-colors shadow-xs disabled:cursor-not-allowed disabled:opacity-45"
                 >
-                  <span>Lock ₹{upiDue.toFixed(0)} Dynamic QR for {customerName}</span>
+                  <span>{isGeneratingInvoice ? 'Creating invoice…' : parsedData.upi_amount > 0 ? `Create bill & show ₹${parsedData.upi_amount.toFixed(2)} QR` : parsedData.udhari_amount > 0 ? `Record ₹${parsedData.udhari_amount.toFixed(2)} store credit` : `Record bill · ₹${parsedData.cash_amount.toFixed(2)} cash`}</span>
                   <ArrowRight className="w-4 h-4" />
                 </button>
               </div>
             </div>
           )}
-        </div>
-      )}
 
-      {/* =================================================================== */}
-      {/* STAGE 2: DYNAMIC QR & REAL-TIME SPOOF GUARD (FLOW 2)               */}
-      {/* =================================================================== */}
-      {currentStep === 2 && (
-        <div className="bg-white rounded-3xl p-8 sm:p-12 border border-[#e5e7eb] shadow-xs space-y-8 animate-in fade-in duration-150">
-          <div className="flex items-center justify-between">
-            <button
-              type="button"
-              onClick={() => setCurrentStep(1)}
-              className="text-xs text-[#86868b] hover:text-[#0071e3] flex items-center gap-1.5 cursor-pointer font-medium"
-            >
-              <ArrowLeft className="w-3.5 h-3.5" />
-              <span>Back to Bill</span>
-            </button>
-            <div className="flex items-center gap-2 text-xs text-[#86868b]">
-              <span>Customer: <strong className="text-[#1d1d1f]">{customerName}</strong></span>
-              <span>•</span>
-              <span className="font-mono">{activeInvoice?.invoice_id || 'Invoice not created'}</span>
-            </div>
-          </div>
-
-          <div className="text-center max-w-xl mx-auto">
-            <span className="text-xs uppercase tracking-wider font-semibold text-[#0071e3] block">
-              Stage 2 • Dynamic QR &amp; Real-Time Spoof Guard
-            </span>
-            <h2 className="text-2xl sm:text-3xl font-semibold text-[#1d1d1f] tracking-tight mt-1">
-              Dynamic Amount-Locked UPI QR
-            </h2>
-            <p className="text-sm text-[#86868b] mt-1">
-              QR amount comes from this invoice • Settlement is checked against gateway evidence
-            </p>
-          </div>
-
-          {/* QR & Locked Amount Display */}
-          <div className="text-center max-w-sm mx-auto p-6 bg-[#f5f5f7] rounded-3xl border border-[#e5e7eb] space-y-3">
-            <span className="text-xs text-[#86868b] block">Amount Locked for {customerName}</span>
-            <span className={`inline-flex rounded-full px-2.5 py-1 text-[10px] font-semibold ${activeInvoice?.payment_mode === 'PAYTM_DYNAMIC_QR' ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'}`}>
-              {activeInvoice?.payment_mode === 'PAYTM_DYNAMIC_QR' ? 'Paytm Dynamic QR' : 'Paytm connection required'}
-            </span>
-            <div className="text-4xl sm:text-5xl font-mono font-bold text-[#1d1d1f]">
-              ₹{upiDue.toFixed(2)}
-            </div>
-
-            {activeInvoice?.payment_mode === 'PAYTM_DYNAMIC_QR' ? (
-              <div className="my-2 flex justify-center"><div className="p-3 bg-white rounded-2xl shadow-xs"><QRCodeDisplay value={activeInvoice.qr_data} size={210} /></div></div>
-            ) : (
-              <div className="my-2 rounded-xl border border-amber-200 bg-amber-50 p-4 text-left text-xs text-amber-900">A payment QR cannot be issued or verified until this merchant’s Paytm Dynamic QR credentials are connected. No placeholder QR is shown.</div>
-            )}
-
-            {activeInvoice?.payment_mode === 'PAYTM_DYNAMIC_QR' && <div className="flex items-center justify-center gap-1.5 text-xs text-[#86868b]">
-              <Clock className="w-3.5 h-3.5 text-[#ff9500]" />
-              <span>
-                QR expires in{' '}
-                <span className="font-mono font-medium text-[#1d1d1f]">
-                  {secondsRemaining === 0 ? 'Expired' : `${Math.floor(secondsRemaining / 60)}:${(secondsRemaining % 60).toString().padStart(2, '0')}`}
-                </span>
-              </span>
-            </div>}
-          </div>
-
-          {/* Real-Time Payment Verification & Spoof Guard */}
-          <div className="max-w-xl mx-auto space-y-4 pt-4 border-t border-[#e5e7eb]">
-            <span className="text-xs font-semibold uppercase tracking-wider text-[#86868b] block text-center">
-              {activeInvoice?.payment_mode === 'PAYTM_DYNAMIC_QR' ? 'Paytm settlement verification' : 'Payment verification unavailable'}
-            </span>
-
-            {activeInvoice?.payment_mode === 'PAYTM_DYNAMIC_QR' ? (
-              <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-center space-y-2">
-                <p className="text-xs text-emerald-900">Vani checks Paytm every few seconds and accepts only a verified transaction for this invoice.</p>
-                <button type="button" onClick={() => handleVerifyPayment()} disabled={isVerifyingPayment}
-                  className="h-9 px-4 rounded-full bg-emerald-700 text-white text-xs font-semibold disabled:opacity-50">
-                  {isVerifyingPayment ? 'Checking Paytm…' : 'Check status now'}
-                </button>
-              </div>
-            ) : (
-              <p className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-center text-xs text-amber-900">Connect Paytm Dynamic QR to receive a genuine payment and verify its settlement here.</p>
-            )}
-
-            {paymentStatusMessage && <p role="status" className="text-center text-xs text-[#5b6472]">{paymentStatusMessage}</p>}
-
-            {/* Success State */}
-            {paymentResult?.status === 'SUCCESS' && (
-              <div className="p-4 bg-emerald-50 border border-emerald-200 rounded-2xl text-xs text-emerald-900 flex items-center justify-between animate-in fade-in">
-                <div className="flex items-center gap-2">
-                  <CheckCircle2 className="w-4 h-4 text-emerald-600 flex-shrink-0" />
-                  <div>
-                    <span className="font-semibold block">Paytm verified payment for {customerName}</span>
-                    <span className="text-[11px] text-emerald-700">₹{paymentResult.amount_received.toFixed(2)} matched the invoice.</span>
-                  </div>
+          {activeInvoice && (
+            <section className="mx-auto max-w-4xl rounded-3xl border border-slate-200 bg-slate-50 p-5 sm:p-7 animate-in fade-in">
+              <div className="mb-5 flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-wide text-emerald-700">Invoice created · {activeInvoice.invoice_id}</p>
+                  <h3 className="mt-1 text-xl font-semibold text-slate-900">{activeInvoice.customer_name || 'Customer'} · ₹{activeInvoice.total_bill.toFixed(2)}</h3>
+                  <p className="mt-1 text-sm text-slate-600">UPI ₹{activeInvoice.upi_due.toFixed(2)} · Cash ₹{activeInvoice.cash_received.toFixed(2)} · Credit ₹{activeInvoice.udhari_amount.toFixed(2)}</p>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => handleTabClick(udhariDue > 0 ? 3 : 4)}
-                  className="h-8 px-4 rounded-full bg-[#34c759] text-white font-medium text-xs cursor-pointer shadow-xs"
-                >
-                  {udhariDue > 0 ? 'Continue to credit →' : 'Continue to restock →'}
-                </button>
+                <button type="button" onClick={handleReset} className="rounded-full border border-slate-300 bg-white px-4 py-2 text-xs font-medium text-slate-700 hover:bg-slate-100">Start new bill</button>
               </div>
-            )}
 
-            {/* Shortfall Warning State */}
-            {paymentResult?.status === 'SHORTFALL_ALERT' && (
-              <div className="p-4 bg-rose-50 border border-rose-300 rounded-2xl text-xs text-rose-900 flex items-center justify-between animate-in fade-in">
-                <div className="flex items-center gap-2">
-                  <AlertTriangle className="w-4 h-4 text-rose-600 flex-shrink-0" />
+              {activeInvoice.upi_due > 0 ? (
+                <div className="grid gap-5 md:grid-cols-[1fr_auto] md:items-center">
                   <div>
-                    <span className="font-semibold block">Shortfall Attack Caught!</span>
-                    <span className="text-[11px] text-rose-700">
-                      Expected ₹{paymentResult.amount_expected.toFixed(2)} • Received only ₹{paymentResult.amount_received.toFixed(2)} (Deficit: ₹{paymentResult.deficit.toFixed(2)})
-                    </span>
+                    <p className="text-sm font-semibold text-slate-900">Collect ₹{activeInvoice.upi_due.toFixed(2)} by UPI</p>
+                    {activeInvoice.payment_mode === 'PAYTM_DYNAMIC_QR' ? (
+                      <>
+                        <p className="mt-1 text-xs text-slate-600">Show this amount-locked QR to the customer. Settlement is checked against the invoice.</p>
+                        <button type="button" onClick={() => void handleVerifyPayment()} disabled={isVerifyingPayment} className="mt-4 rounded-full bg-emerald-700 px-4 py-2.5 text-xs font-semibold text-white disabled:opacity-50">{isVerifyingPayment ? 'Checking payment…' : 'Check payment status'}</button>
+                      </>
+                    ) : (
+                      <p className="mt-2 max-w-md rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">Demo QR for interface validation only. It cannot accept money or verify settlement. Connect the merchant’s Paytm Dynamic QR account for live payments.</p>
+                    )}
+                    {paymentStatusMessage && <p role="status" className="mt-3 text-xs text-slate-600">{paymentStatusMessage}</p>}
+                    {paymentResult && <p role="status" className={`mt-3 rounded-xl p-3 text-sm font-semibold ${paymentResult.status === 'SUCCESS' ? 'bg-emerald-100 text-emerald-800' : 'bg-rose-100 text-rose-800'}`}>{paymentResult.status === 'SUCCESS' ? `Payment verified: ₹${paymentResult.amount_received.toFixed(2)} received.` : `Payment shortfall: ₹${paymentResult.amount_received.toFixed(2)} received, ₹${paymentResult.deficit.toFixed(2)} still due.`}</p>}
                   </div>
+                  {activeInvoice.qr_data && <div className="justify-self-center text-center"><div className="rounded-2xl bg-white p-3 shadow-sm"><QRCodeDisplay value={activeInvoice.qr_data} size={190} /></div><p className="mt-2 text-xs font-semibold text-slate-700">{activeInvoice.payment_mode === 'PAYTM_DYNAMIC_QR' ? 'Live Paytm QR' : 'Demo QR · not payable'}</p><p className="mt-1 text-xs text-slate-600">{activeInvoice.payment_mode === 'PAYTM_DYNAMIC_QR' ? (secondsRemaining === 0 ? 'QR expired' : `QR expires in ${Math.floor(secondsRemaining / 60)}:${(secondsRemaining % 60).toString().padStart(2, '0')}`) : `Invoice ${activeInvoice.invoice_id}`}</p></div>}
                 </div>
-                <button
-                  type="button"
-                  onClick={() => setPaymentResult(null)}
-                  className="text-xs text-rose-700 underline font-medium cursor-pointer"
-                >
-                  Dismiss
-                </button>
-              </div>
-            )}
+              ) : (
+                <p className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">No UPI payment is due on this bill. Cash and store credit have been recorded; there is no QR to show.</p>
+              )}
 
-            {/* Advance to Step 3 */}
-            <div className="pt-4 flex justify-between items-center border-t border-[#f5f5f7]">
-              <button
-                type="button"
-                onClick={() => setCurrentStep(1)}
-                className="text-xs text-[#86868b] hover:underline"
-              >
-                ← Back to Bill
-              </button>
-              <button
-                type="button"
-                onClick={() => setCurrentStep(udhariDue > 0 ? 3 : 4)}
-                className="h-11 px-6 rounded-full bg-[#0071e3] hover:bg-[#2997ff] text-white text-xs font-medium flex items-center gap-1.5 cursor-pointer shadow-xs transition-colors"
-              >
-                <span>{udhariDue > 0 ? `Continue to ${customerName}’s Credit Recovery (₹${udhariDue.toFixed(2)})` : 'Continue to Restock Audit'}</span>
-                <ArrowRight className="w-4 h-4" />
-              </button>
-            </div>
-          </div>
+              {activeInvoice.udhari_amount > 0 && <button type="button" onClick={() => setCurrentStep(3)} className="mt-5 rounded-full bg-[#0071e3] px-5 py-3 text-sm font-semibold text-white">Manage ₹{activeInvoice.udhari_amount.toFixed(2)} store credit</button>}
+            </section>
+          )}
         </div>
       )}
 
@@ -824,16 +794,16 @@ export const CheckoutTerminal: React.FC = () => {
           <div className="flex items-center justify-between">
             <button
               type="button"
-              onClick={() => setCurrentStep(2)}
+              onClick={() => setCurrentStep(1)}
               className="text-xs text-[#86868b] hover:text-[#0071e3] flex items-center gap-1.5 cursor-pointer font-medium"
             >
               <ArrowLeft className="w-3.5 h-3.5" />
-              <span>Back to Payment</span>
+              <span>Back to Checkout</span>
             </button>
             <span
               className={`text-xs font-medium px-3 py-1 rounded-full ${reminderSent ? 'bg-sky-50 text-[#0071e3]' : 'bg-amber-50 text-amber-700'}`}
             >
-              {reminderSent ? 'WhatsApp Draft Prepared' : 'Credit Balance Active'}
+              {reminderSent ? 'WhatsApp Draft Prepared' : activeInvoice?.udhari_id ? 'Credit Balance Active' : 'Ledger View'}
             </span>
           </div>
 
@@ -842,13 +812,14 @@ export const CheckoutTerminal: React.FC = () => {
               Stage 3 • Store Credit &amp; WhatsApp Recovery
             </span>
             <h2 className="text-2xl sm:text-3xl font-semibold text-[#1d1d1f] tracking-tight mt-1">
-              Store Credit for {customerName}
+              {activeInvoice?.udhari_id && activeInvoice.udhari_amount > 0 ? `Store Credit for ${customerName}` : 'Store Credit Ledger'}
             </h2>
             <p className="text-sm text-[#86868b] mt-1">
-              Amounts and contact details are carried from the bill you just created.
+              {activeInvoice?.udhari_id && activeInvoice.udhari_amount > 0 ? 'Amounts and contact details are carried from the bill you just created.' : 'View outstanding balances from the merchant ledger and prepare customer reminders.'}
             </p>
           </div>
 
+          {activeInvoice?.udhari_id && activeInvoice.udhari_amount > 0 ? (
           <div className="max-w-xl mx-auto space-y-6">
             {/* Credit Details Grid */}
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 py-4 border-y border-[#e5e7eb] text-center">
@@ -906,10 +877,10 @@ export const CheckoutTerminal: React.FC = () => {
             <div className="pt-4 flex justify-between items-center border-t border-[#f5f5f7]">
               <button
                 type="button"
-                onClick={() => setCurrentStep(2)}
+                onClick={() => setCurrentStep(1)}
                 className="text-xs text-[#86868b] hover:underline"
               >
-                ← Back to Payment
+                ← Back to Checkout
               </button>
               <button
                 type="button"
@@ -921,6 +892,23 @@ export const CheckoutTerminal: React.FC = () => {
               </button>
             </div>
           </div>
+          ) : (
+            <div className="mx-auto max-w-3xl space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div><h3 className="text-sm font-semibold text-slate-900">Outstanding store credit</h3><p className="mt-1 text-xs text-slate-500">Loaded from this merchant’s credit ledger.</p></div>
+                <button type="button" onClick={() => { setIsLoadingCredits(true); setCreditLoadError(''); getUdhariList().then(setCreditEntries).catch((error) => setCreditLoadError(error instanceof Error ? error.message : 'Could not load the store credit ledger.')).finally(() => setIsLoadingCredits(false)); }} disabled={isLoadingCredits} className="rounded-full border border-slate-300 bg-white px-3 py-2 text-xs font-medium text-slate-700 disabled:opacity-50">{isLoadingCredits ? 'Refreshing…' : 'Refresh ledger'}</button>
+              </div>
+              {creditLoadError && <p role="alert" className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-xs text-rose-800">{creditLoadError}</p>}
+              {isLoadingCredits ? <p className="rounded-xl bg-slate-50 p-6 text-center text-sm text-slate-500">Loading store credit ledger…</p> : creditEntries.filter((entry) => entry.status !== 'SETTLED').length === 0 ? <p className="rounded-xl border border-slate-200 bg-slate-50 p-6 text-center text-sm text-slate-600">No unpaid store credit records found. Create a checkout with a credit balance to add one.</p> : (
+                <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white">
+                  {creditEntries.filter((entry) => entry.status !== 'SETTLED').map((entry) => <div key={entry.id} className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 p-4 last:border-0">
+                    <div><p className="text-sm font-semibold text-slate-900">{entry.customer_name}</p><p className="mt-1 text-xs text-slate-500">{entry.transaction_id} · Due {formatDueDate(entry.due_date)} · {entry.status.replace('_', ' ').toLowerCase()}</p></div>
+                    <div className="flex items-center gap-3"><span className="font-mono text-sm font-bold text-amber-700">₹{entry.amount_due.toFixed(2)}</span><button type="button" onClick={() => handleOpenLedgerWhatsApp(entry)} disabled={!entry.customer_phone} title={!entry.customer_phone ? 'A phone number is required' : 'Prepare a WhatsApp reminder'} className="rounded-full bg-[#25D366] px-3 py-2 text-xs font-semibold text-white disabled:cursor-not-allowed disabled:opacity-40">Prepare reminder</button></div>
+                  </div>)}
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
 
@@ -932,11 +920,11 @@ export const CheckoutTerminal: React.FC = () => {
           <div className="flex items-center justify-between">
             <button
               type="button"
-              onClick={() => setCurrentStep(activeInvoice ? (udhariDue > 0 ? 3 : 2) : 1)}
+              onClick={() => setCurrentStep(activeInvoice && udhariDue > 0 ? 3 : 1)}
               className="text-xs text-[#86868b] hover:text-[#0071e3] flex items-center gap-1.5 cursor-pointer font-medium"
             >
               <ArrowLeft className="w-3.5 h-3.5" />
-              <span>{activeInvoice ? (udhariDue > 0 ? 'Back to Store Credit' : 'Back to Payment') : 'Back to Checkout'}</span>
+              <span>{activeInvoice && udhariDue > 0 ? 'Back to Store Credit' : 'Back to Checkout'}</span>
             </button>
             <span className="text-xs text-[#86868b]">Wholesaler Invoice OCR</span>
           </div>
@@ -1087,10 +1075,10 @@ export const CheckoutTerminal: React.FC = () => {
             <div className="pt-6 border-t border-[#f5f5f7] flex justify-between items-center">
               <button
                 type="button"
-                onClick={() => setCurrentStep(3)}
+                onClick={() => setCurrentStep(activeInvoice && udhariDue > 0 ? 3 : 1)}
                 className="text-xs text-[#86868b] hover:underline"
               >
-                ← Back to Store Credit
+                {activeInvoice && udhariDue > 0 ? '← Back to Store Credit' : '← Back to Checkout'}
               </button>
               <button
                 type="button"

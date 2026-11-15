@@ -2,7 +2,6 @@
 
 import React, { useEffect, useState } from 'react';
 import QRCode from 'qrcode';
-import { Radio } from 'lucide-react';
 
 interface QRCodeDisplayProps {
   value: string;
@@ -16,51 +15,42 @@ export const QRCodeDisplay: React.FC<QRCodeDisplayProps> = ({
   className = '',
 }) => {
   const [dataUrl, setDataUrl] = useState<string>('');
+  const [generationError, setGenerationError] = useState(false);
 
   useEffect(() => {
-    if (!value) return;
+    let cancelled = false;
+    setDataUrl('');
+    setGenerationError(false);
+    if (!value.trim()) return () => { cancelled = true; };
+
     QRCode.toDataURL(value, {
       width: size,
-      margin: 1,
+      margin: 3,
       color: {
-        dark: '#3d3d3d', // Charcoal
+        dark: '#000000',
         light: '#ffffff',
       },
       errorCorrectionLevel: 'H',
     })
-      .then((url) => setDataUrl(url))
-      .catch((err) => console.error('QR code generation error:', err));
+      .then((url) => { if (!cancelled) setDataUrl(url); })
+      .catch((err) => {
+        console.error('QR code generation error:', err);
+        if (!cancelled) setGenerationError(true);
+      });
+    return () => { cancelled = true; };
   }, [value, size]);
 
   if (!dataUrl) {
     return (
       <div
         style={{ width: size, height: size }}
-        className={`flex items-center justify-center bg-[#fcfcfc] rounded-[16px] border border-[#e6e6e6] animate-pulse ${className}`}
+        role="status"
+        className={`flex items-center justify-center bg-white rounded-[16px] border border-[#e6e6e6] ${!generationError ? 'animate-pulse' : ''} ${className}`}
       >
-        <span className="text-xs text-[#717171] font-medium">Generating Dynamic QR...</span>
+        <span className="px-4 text-center text-xs text-[#717171] font-medium">{generationError ? 'Could not create QR. Reopen this invoice to try again.' : value ? 'Creating secure QR…' : 'No QR for this bill'}</span>
       </div>
     );
   }
 
-  return (
-    <div className={`relative inline-block ${className}`}>
-      {/* eslint-disable-next-line @next/next/no-img-element */}
-      <img
-        src={dataUrl}
-        alt="Dynamic Amount-Locked UPI QR"
-        width={size}
-        height={size}
-        className="rounded-[16px] border border-[#e6e6e6]"
-      />
-      {/* Vani Center Audio Emblem */}
-      <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-        <div className="w-10 h-10 bg-white rounded-full shadow-sm border border-[#3a3f5c] flex items-center justify-center p-1">
-          <div className="w-full h-full bg-[#3a3f5c] rounded-full flex items-center justify-center text-white">
-            <Radio className="w-4 h-4 text-white" />
-          </div>
-        </div>
-      </div>
-    </div>
-  );
+  return <img src={dataUrl} alt="Amount and invoice encoded QR code" width={size} height={size} className={`rounded-xl border border-slate-200 bg-white p-1 ${className}`} />;
 };

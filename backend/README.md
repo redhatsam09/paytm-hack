@@ -59,7 +59,7 @@ pytest -v
 
 ### 2.2 Counter & Dynamic QR Generation
 - **`POST /api/counter/create-invoice`**
-  Saves the transaction and Udhari ledger draft. With Paytm merchant credentials it requests a Paytm Dynamic QR. Without them the API returns a `DEMO` placeholder QR; the active web UI intentionally does not display or treat that placeholder as payable.
+  Saves the transaction and optional Udhari ledger entry. With Paytm merchant credentials it requests a Paytm Dynamic QR. Without them, a UPI bill gets an explicitly non-payable `DEMO` QR for interface review. A credit-only invoice has no QR.
 - **`GET /api/counter/active`**
   Retrieves active counter invoice state for dual-screen synchronization.
 - **`POST /api/counter/reset`**
