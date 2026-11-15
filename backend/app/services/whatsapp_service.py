@@ -14,14 +14,13 @@ def format_udhari_whatsapp_message(
     payment_link: str,
     store_name: str = "Sri Lakshmi Stores"
 ) -> Dict[str, Any]:
-    """Format interactive WhatsApp message for Udhari collection."""
+    """Format professional WhatsApp message for credit balance collection."""
     text = (
-        f"Namaste {customer_name} ji! 🛒\n\n"
-        f"Aapka ₹{int(amount) if amount.is_integer() else amount:.2f} ka udhari bahi-khata bill due hai {store_name} par.\n"
-        f"📅 Due Date: {due_date}\n\n"
-        f"Kripya niche diye gaye Paytm UPI link se 1-click payment karein:\n"
-        f"👉 {payment_link}\n\n"
-        f"Payment hote hi aapka ledger turant settle ho jayega. Dhanyawad!"
+        f"Dear {customer_name},\n\n"
+        f"Your store credit balance of ₹{int(amount) if amount.is_integer() else amount:.2f} at {store_name} is scheduled for payment on {due_date}.\n\n"
+        f"Please complete your payment using this secure direct link:\n"
+        f"{payment_link}\n\n"
+        f"Your account balance will be settled immediately upon payment completion. Thank you."
     )
 
     return {
@@ -57,17 +56,17 @@ def format_po_whatsapp_message(
         rate = itm.get("expected_rate", 0.0)
         line_tot = qty * rate
         total_est += line_tot
-        items_lines.append(f"  {idx}. {sku} — {qty} units @ ₹{rate:.2f} (₹{line_tot:.2f})")
+        items_lines.append(f"  {idx}. {sku} - {qty} units @ ₹{rate:.2f} (₹{line_tot:.2f})")
 
     items_text = "\n".join(items_lines)
     message = (
-        f"📦 *PURCHASE ORDER: #{po_number}*\n"
+        f"PURCHASE ORDER: #{po_number}\n"
         f"To: {supplier_name}\n"
         f"From: {store_name} (+919876543210)\n\n"
-        f"*Required Stock Items:*\n{items_text}\n\n"
-        f"💰 Estimated Value: ₹{total_est:.2f}\n"
+        f"Required Stock Items:\n{items_text}\n\n"
+        f"Estimated Total: ₹{total_est:.2f}\n"
         f"Please confirm delivery schedule and dispatch invoice.\n"
-        f"Thank you!"
+        f"Thank you."
     )
 
     return {

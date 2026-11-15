@@ -705,10 +705,10 @@ export const CheckoutTerminal: React.FC = () => {
                   <AlertTriangle className="w-5 h-5 text-rose-600 flex-shrink-0" />
                   <div>
                     <span className="font-bold block">
-                      Shortfall Alert for {customerName}!
+                      Shortfall Alert for {customerName}
                     </span>
                     <span className="text-xs">
-                      Received ₹{paymentResult.amount_received.toFixed(2)} • Deficit: ₹{paymentResult.deficit.toFixed(2)} baaki hai
+                      Received ₹{paymentResult.amount_received.toFixed(2)} • Outstanding Deficit: ₹{paymentResult.deficit.toFixed(2)}
                     </span>
                   </div>
                 </div>
@@ -793,18 +793,19 @@ export const CheckoutTerminal: React.FC = () => {
               <span className="text-xs font-medium text-[#717171] block">
                 Scheduled WhatsApp Reminder Message:
               </span>
-              <div className="p-4 rounded-xl bg-white border border-[#e6e6e6] text-sm text-[#3d3d3d] space-y-2">
-                <p>
-                  Namaste <strong>{customerName}</strong> ji! 🛒
+              <div className="p-5 rounded-2xl bg-white border border-[#e6e6e6] text-sm text-[#3d3d3d] space-y-2">
+                <p className="font-medium">
+                  Dear {customerName},
+                </p>
+                <p className="text-xs text-[#717171] leading-relaxed">
+                  Your store credit balance of <strong>₹{(activeInvoice?.udhari_amount || parsedData?.udhari_amount || 250).toFixed(2)}</strong> at Sri Lakshmi Stores is scheduled for payment on <strong>{activeInvoice?.due_date || parsedData?.due_date || 'Monday'}</strong>.
                 </p>
                 <p className="text-xs text-[#717171]">
-                  Aapka <strong>₹{(activeInvoice?.udhari_amount || parsedData?.udhari_amount || 250).toFixed(2)}</strong> ka balance bill due hai Sri Lakshmi Stores par.
-                  <br />
-                  Promised Date: {activeInvoice?.due_date || parsedData?.due_date || 'Monday'}
+                  Please complete your payment using the direct payment link:
                 </p>
                 <div className="pt-2">
-                  <span className="inline-block px-3 py-1.5 rounded-full bg-[#3a3f5c] text-white text-xs font-medium">
-                    Paytm Instant Pay: https://p.paytm.me/pay?id=udh-001
+                  <span className="inline-block px-4 py-2 rounded-full bg-[#3a3f5c] text-white text-xs font-medium">
+                    Pay Now: https://p.paytm.me/pay?id=credit-001
                   </span>
                 </div>
               </div>
