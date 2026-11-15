@@ -23,8 +23,8 @@ export const QRCodeDisplay: React.FC<QRCodeDisplayProps> = ({
       width: size,
       margin: 1,
       color: {
-        dark: '#0A1B3D', // Dark Navy
-        light: '#FFFFFF',
+        dark: '#3d3d3d', // Charcoal
+        light: '#ffffff',
       },
       errorCorrectionLevel: 'H',
     })
@@ -36,9 +36,9 @@ export const QRCodeDisplay: React.FC<QRCodeDisplayProps> = ({
     return (
       <div
         style={{ width: size, height: size }}
-        className={`flex items-center justify-center bg-[#F8FAFC] rounded-[4px] border border-[#E6EAF5] animate-pulse ${className}`}
+        className={`flex items-center justify-center bg-[#fcfcfc] rounded-[16px] border border-[#e6e6e6] animate-pulse ${className}`}
       >
-        <span className="text-xs text-[#6B7A99] font-medium">Generating Dynamic QR...</span>
+        <span className="text-xs text-[#717171] font-medium">Generating Dynamic QR...</span>
       </div>
     );
   }
@@ -51,12 +51,12 @@ export const QRCodeDisplay: React.FC<QRCodeDisplayProps> = ({
         alt="Dynamic Amount-Locked UPI QR"
         width={size}
         height={size}
-        className="rounded-[4px] border border-[#E6EAF5]"
+        className="rounded-[16px] border border-[#e6e6e6]"
       />
-      {/* Vani Center Audio Badge */}
+      {/* Vani Center Audio Emblem */}
       <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-        <div className="w-9 h-9 bg-white rounded-[4px] shadow-sm border border-[#533AFD] flex items-center justify-center p-1">
-          <div className="w-full h-full bg-[#533AFD] rounded-[2px] flex items-center justify-center text-white">
+        <div className="w-10 h-10 bg-white rounded-full shadow-sm border border-[#3a3f5c] flex items-center justify-center p-1">
+          <div className="w-full h-full bg-[#3a3f5c] rounded-full flex items-center justify-center text-white">
             <Radio className="w-4 h-4 text-white" />
           </div>
         </div>
